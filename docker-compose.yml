@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: jungle-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jungle
+      POSTGRES_PASSWORD: jungle
+      POSTGRES_DB: jungle_wallet
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jungle -d jungle_wallet"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:3
+    container_name: jungle-localstack
+    restart: unless-stopped
+    environment:
+      SERVICES: sqs
+      DEBUG: 0
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Single instance for now. Once the concurrency scenarios are in place,
+  # this gets scaled with `docker compose up --scale app=3` — at that point
+  # the fixed host port below will need to move to a load balancer in front
+  # instead of a direct host mapping.
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jungle-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://jungle:jungle@postgres:5432/jungle_wallet
+      AWS_ENDPOINT: http://localstack:4566
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  localstack-data:

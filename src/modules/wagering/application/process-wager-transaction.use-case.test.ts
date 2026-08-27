@@ -2,6 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { type IdGenerator } from '../../../shared/application/id-generator';
 import { Money } from '../../../shared/domain/money';
+import { type OutboxMessageRepository } from '../../messaging/application/ports/outbox-message.repository';
+import { type OutboxMessage } from '../../messaging/domain/outbox-message';
 import { type WalletLedgerEntryRepository } from '../../wallet/application/ports/wallet-ledger-entry.repository';
 import { type WalletRepository } from '../../wallet/application/ports/wallet.repository';
 import { Wallet } from '../../wallet/domain/wallet';
@@ -105,10 +107,23 @@ class FakeWagerTransactionRepository implements WagerTransactionRepository {
   }
 }
 
+class FakeOutboxMessageRepository implements OutboxMessageRepository {
+  readonly messages: OutboxMessage[] = [];
+
+  async claimDue(): Promise<OutboxMessage[]> {
+    return this.messages.filter((m) => !m.isPublished);
+  }
+
+  async save(message: OutboxMessage): Promise<void> {
+    this.messages.push(message);
+  }
+}
+
 function setup() {
   const walletRepository = new FakeWalletRepository();
   const walletLedgerEntryRepository = new FakeWalletLedgerEntryRepository();
   const wagerTransactionRepository = new FakeWagerTransactionRepository();
+  const outboxMessageRepository = new FakeOutboxMessageRepository();
   const idGenerator = new SequentialIdGenerator();
 
   const useCase = new ProcessWagerTransactionUseCase(
@@ -116,10 +131,17 @@ function setup() {
     walletRepository,
     walletLedgerEntryRepository,
     wagerTransactionRepository,
+    outboxMessageRepository,
     idGenerator,
   );
 
-  return { useCase, walletRepository, walletLedgerEntryRepository, wagerTransactionRepository };
+  return {
+    useCase,
+    walletRepository,
+    walletLedgerEntryRepository,
+    wagerTransactionRepository,
+    outboxMessageRepository,
+  };
 }
 
 function betCommand(
@@ -157,7 +179,8 @@ function betCommand(
  */
 describe('ProcessWagerTransactionUseCase', () => {
   it('processa um BET com saldo suficiente: debita e gera 1 lançamento DEBIT', async () => {
-    const { useCase, walletLedgerEntryRepository, walletRepository } = setup();
+    const { useCase, walletLedgerEntryRepository, walletRepository, outboxMessageRepository } =
+      setup();
     const wallet = Wallet.create({ id: 'w1', playerId: 'p1', currency: 'BRL' });
     wallet.credit(Money.fromString('100.00', 'BRL'));
     walletRepository.seed(wallet);
@@ -169,10 +192,15 @@ describe('ProcessWagerTransactionUseCase', () => {
     expect(result.balance).toEqual({ amount: '20.00', currency: 'BRL' });
     expect(walletLedgerEntryRepository.entries).toHaveLength(1);
     expect(walletLedgerEntryRepository.entries[0]?.direction).toBe(LedgerDirection.Debit);
+
+    // Processed + WalletBalanceChanged (saldo mudou de fato).
+    const eventTypes = outboxMessageRepository.messages.map((m) => m.eventType).sort();
+    expect(eventTypes).toEqual(['WagerTransactionProcessed', 'WalletBalanceChanged'].sort());
   });
 
   it('rejeita um BET sem saldo suficiente: não move saldo, não gera ledger', async () => {
-    const { useCase, walletLedgerEntryRepository, walletRepository } = setup();
+    const { useCase, walletLedgerEntryRepository, walletRepository, outboxMessageRepository } =
+      setup();
     const wallet = Wallet.create({ id: 'w1', playerId: 'p1', currency: 'BRL' });
     wallet.credit(Money.fromString('50.00', 'BRL'));
     walletRepository.seed(wallet);
@@ -183,6 +211,11 @@ describe('ProcessWagerTransactionUseCase', () => {
     expect(result.failureCode).toBe('INSUFFICIENT_BALANCE');
     expect(result.balance).toEqual({ amount: '50.00', currency: 'BRL' });
     expect(walletLedgerEntryRepository.entries).toHaveLength(0);
+
+    // Só Rejected — nunca WalletBalanceChanged, o saldo não mudou.
+    expect(outboxMessageRepository.messages.map((m) => m.eventType)).toEqual([
+      'WagerTransactionRejected',
+    ]);
   });
 
   it('processa um WIN: credita e gera 1 lançamento CREDIT', async () => {
@@ -220,7 +253,8 @@ describe('ProcessWagerTransactionUseCase', () => {
   });
 
   it('processa uma LOSS: não move saldo e não gera ledger, mas fica Processed', async () => {
-    const { useCase, walletLedgerEntryRepository, walletRepository } = setup();
+    const { useCase, walletLedgerEntryRepository, walletRepository, outboxMessageRepository } =
+      setup();
     const wallet = Wallet.create({ id: 'w1', playerId: 'p1', currency: 'BRL' });
     wallet.credit(Money.fromString('100.00', 'BRL'));
     walletRepository.seed(wallet);
@@ -232,6 +266,11 @@ describe('ProcessWagerTransactionUseCase', () => {
     expect(result.status).toBe(WagerTransactionStatus.Processed);
     expect(result.balance).toEqual({ amount: '100.00', currency: 'BRL' });
     expect(walletLedgerEntryRepository.entries).toHaveLength(0);
+
+    // Processed sozinho — sem WalletBalanceChanged, LOSS não move saldo.
+    expect(outboxMessageRepository.messages.map((m) => m.eventType)).toEqual([
+      'WagerTransactionProcessed',
+    ]);
   });
 
   it('rejeita REFUND/ROLLBACK como kind não suportado ainda (Parte 7)', async () => {

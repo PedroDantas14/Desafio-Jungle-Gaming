@@ -21,8 +21,9 @@ export interface CreateWalletResult {
  * Só abre a wallet com saldo zero. `initialBalance > 0` (seção 9) vira um
  * OPENING processado via `ProcessWagerTransactionUseCase` logo em
  * seguida, pela mesma camada que já sabe creditar/gerar ledger — evita
- * duplicar essa lógica aqui. Orquestração dos dois fica pro controller
- * da Parte 6, dentro da mesma transação.
+ * duplicar essa lógica aqui. Orquestração dos dois fica no
+ * `WalletController` (Parte 6), usando `processWithinTransaction` dos
+ * dois use cases dentro de uma única transação.
  */
 @Injectable()
 export class CreateWalletUseCase {
@@ -33,26 +34,42 @@ export class CreateWalletUseCase {
   ) {}
 
   async execute(command: CreateWalletCommand): Promise<CreateWalletResult> {
-    return this.em.transactional(async (em) => {
-      const existing = await this.walletRepository.findByPlayerAndCurrency(
-        command.playerId,
-        command.currency,
-        em,
-      );
-      if (existing) {
-        throw new WalletAlreadyExistsError(command.playerId, command.currency);
-      }
+    return this.em.transactional((em) => this.processWithinTransaction(command, em));
+  }
 
-      const wallet = Wallet.create({
-        id: this.idGenerator.next(),
-        playerId: command.playerId,
-        currency: command.currency,
-      });
+  /** Mesma lógica de `execute()`, dentro de uma transação que o chamador já abriu. */
+  async processWithinTransaction(
+    command: CreateWalletCommand,
+    em: EntityManager,
+  ): Promise<CreateWalletResult> {
+    const existing = await this.walletRepository.findByPlayerAndCurrency(
+      command.playerId,
+      command.currency,
+      em,
+    );
+    if (existing) {
+      throw new WalletAlreadyExistsError(command.playerId, command.currency);
+    }
 
-      await this.walletRepository.save(wallet, em);
-
-      return this.toResult(wallet);
+    const wallet = Wallet.create({
+      id: this.idGenerator.next(),
+      playerId: command.playerId,
+      currency: command.currency,
     });
+
+    await this.walletRepository.save(wallet, em);
+
+    // Flush explícito: como os agregados se referenciam só por FK escalar
+    // (sem relação @ManyToOne do MikroORM — ver wallet.orm-entity.ts),
+    // o ORM não sabe que um insert de WagerTransaction feito logo em
+    // seguida, na MESMA transação composta (ex: POST /wallets com
+    // initialBalance orquestrando este use case + ProcessWagerTransactionUseCase),
+    // depende dessa wallet existir primeiro. Sem isso, o flush final da
+    // transação pode mandar os inserts fora de ordem e o Postgres rejeita
+    // a FK (achado testando o endpoint de verdade, não só em unit test).
+    await em.flush();
+
+    return this.toResult(wallet);
   }
 
   private toResult(wallet: Wallet): CreateWalletResult {

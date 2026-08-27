@@ -21,19 +21,35 @@ import {
   WagerTransactionStatus,
 } from '../domain/wager-transaction';
 import { UnsupportedWagerKindError } from '../domain/wagering.errors';
+import { WagerTransactionPendingReferenceEvent } from '../domain/events/wager-transaction-pending-reference.event';
 import { WagerTransactionProcessedEvent } from '../domain/events/wager-transaction-processed.event';
 import { WagerTransactionRejectedEvent } from '../domain/events/wager-transaction-rejected.event';
 import { WagerTransactionRepository } from './ports/wager-transaction.repository';
 
-// BET/WIN/LOSS/OPENING têm efeito direto no saldo, sem depender de
-// resolver referência pra outra transação. REFUND/ROLLBACK exigem essa
-// resolução (regras 1-5 da seção 7) — chegam na Parte 7.
+// Todos os kinds da seção 6.3 já têm efeito implementado. REFUND/ROLLBACK
+// (Parte 7) resolvem referência antes de aplicar efeito — ver applyReversal.
 const SUPPORTED_KINDS: ReadonlySet<WagerTransactionKind> = new Set([
   WagerTransactionKind.Bet,
   WagerTransactionKind.Win,
   WagerTransactionKind.Loss,
   WagerTransactionKind.Opening,
+  WagerTransactionKind.Refund,
+  WagerTransactionKind.Rollback,
 ]);
+
+// REFUND só reverte um BET; ROLLBACK reverte BET, WIN ou REFUND (regra 3, seção 7).
+const ALLOWED_REFERENCE_KINDS: Record<WagerTransactionKind, ReadonlySet<WagerTransactionKind>> = {
+  [WagerTransactionKind.Refund]: new Set([WagerTransactionKind.Bet]),
+  [WagerTransactionKind.Rollback]: new Set([
+    WagerTransactionKind.Bet,
+    WagerTransactionKind.Win,
+    WagerTransactionKind.Refund,
+  ]),
+  [WagerTransactionKind.Bet]: new Set(),
+  [WagerTransactionKind.Win]: new Set(),
+  [WagerTransactionKind.Loss]: new Set(),
+  [WagerTransactionKind.Opening]: new Set(),
+};
 
 export interface ProcessWagerTransactionCommand {
   providerId: string;
@@ -160,8 +176,70 @@ export class ProcessWagerTransactionUseCase {
       referenceExternalTransactionId: command.referenceExternalTransactionId,
     });
 
-    const ledgerEntry = this.applyEffect(transaction, wallet, money);
+    const ledgerEntry = await this.applyEffect(transaction, wallet, money, em);
 
+    await this.persistOutcome(
+      transaction,
+      wallet,
+      ledgerEntry,
+      command.correlationId,
+      command.causationId,
+      em,
+    );
+
+    return this.toResult(transaction, wallet, false);
+  }
+
+  /**
+   * Reprocessa uma transação já em `PendingReference` (worker da seção
+   * 7.1) — a referência pode ter aparecido nesse meio tempo. Refaz a
+   * leitura da transação sob a wallet travada: se outra instância/ciclo já
+   * resolveu essa mesma transação entretanto, vira um no-op silencioso em
+   * vez de um erro de transição de estado inválida.
+   */
+  async retryPendingReference(transactionId: string, em: EntityManager): Promise<void> {
+    const current = await this.wagerTransactionRepository.findById(transactionId, em);
+    if (!current || current.status !== WagerTransactionStatus.PendingReference) {
+      return;
+    }
+
+    const wallet = await this.walletRepository.findByIdForUpdate(current.walletId, em);
+    if (!wallet) {
+      throw new WalletNotFoundError(current.walletId);
+    }
+
+    const ledgerEntry = await this.applyReversal(current, wallet, em);
+    await this.persistOutcome(current, wallet, ledgerEntry, undefined, undefined, em);
+  }
+
+  /**
+   * Esgotado o TTL de espera pela referência (seção 7.1) — rejeita
+   * explicitamente em vez de deixar a transação pendurada pra sempre.
+   * Mesma proteção contra corrida que `retryPendingReference`.
+   */
+  async expirePendingReference(transactionId: string, em: EntityManager): Promise<void> {
+    const current = await this.wagerTransactionRepository.findById(transactionId, em);
+    if (!current || current.status !== WagerTransactionStatus.PendingReference) {
+      return;
+    }
+
+    const wallet = await this.walletRepository.findById(current.walletId, em);
+    if (!wallet) {
+      throw new WalletNotFoundError(current.walletId);
+    }
+
+    current.markRejected('REFERENCE_NOT_FOUND');
+    await this.persistOutcome(current, wallet, undefined, undefined, undefined, em);
+  }
+
+  private async persistOutcome(
+    transaction: WagerTransaction,
+    wallet: Wallet,
+    ledgerEntry: WalletLedgerEntry | undefined,
+    correlationId: string | undefined,
+    causationId: string | undefined,
+    em: EntityManager,
+  ): Promise<void> {
     await this.walletRepository.save(wallet, em);
     if (ledgerEntry) {
       await this.walletLedgerEntryRepository.save(ledgerEntry, em);
@@ -169,11 +247,25 @@ export class ProcessWagerTransactionUseCase {
     await this.wagerTransactionRepository.save(transaction, em);
 
     const ctx: IntegrationEventContext = {
-      correlationId: command.correlationId ?? this.idGenerator.next(),
-      causationId: command.causationId,
+      correlationId: correlationId ?? this.idGenerator.next(),
+      causationId,
     };
     await this.enqueueEvents(transaction, wallet, ledgerEntry, ctx, em);
 
+    // Flush explícito — agregados se referenciam só por FK escalar (sem
+    // relação do MikroORM), então se este método for composto com outro
+    // use case na mesma transação (ex: consumer SQS: inbox + este use
+    // case), o próximo insert dependente precisa encontrar estas linhas
+    // já na base, não só no unit of work em memória. Achado testando o
+    // endpoint de verdade (Parte 6), não em unit test.
+    await em.flush();
+  }
+
+  private toResult(
+    transaction: WagerTransaction,
+    wallet: Wallet,
+    idempotentReplay: boolean,
+  ): ProcessWagerTransactionResult {
     return {
       transactionId: transaction.id,
       status: transaction.status,
@@ -181,7 +273,7 @@ export class ProcessWagerTransactionUseCase {
         amount: wallet.currentBalance.toString(),
         currency: wallet.currentBalance.currencyCode,
       },
-      idempotentReplay: false,
+      idempotentReplay,
       failureCode: transaction.failureCode,
     };
   }
@@ -189,34 +281,131 @@ export class ProcessWagerTransactionUseCase {
   /**
    * Aplica o efeito de negócio no saldo (regras da seção 7) e transiciona
    * a transação pro status final. Devolve o lançamento de ledger quando
-   * há impacto financeiro — `undefined` pra LOSS e pra rejeição (regra 6:
-   * "REJECTED não altera saldo nem gera ledger").
+   * há impacto financeiro — `undefined` pra LOSS, rejeição, e
+   * PendingReference (regra 6: "REJECTED não altera saldo nem gera ledger").
    */
-  private applyEffect(
+  private async applyEffect(
     transaction: WagerTransaction,
     wallet: Wallet,
     money: Money,
-  ): WalletLedgerEntry | undefined {
-    try {
-      switch (transaction.kind) {
-        case WagerTransactionKind.Bet:
+    em: EntityManager,
+  ): Promise<WalletLedgerEntry | undefined> {
+    switch (transaction.kind) {
+      case WagerTransactionKind.Bet:
+        try {
           return this.debit(transaction, wallet, money);
+        } catch (error) {
+          if (error instanceof InsufficientBalanceError) {
+            transaction.markRejected('INSUFFICIENT_BALANCE');
+            return undefined;
+          }
+          throw error;
+        }
 
-        case WagerTransactionKind.Win:
-        case WagerTransactionKind.Opening:
-          return this.credit(transaction, wallet, money);
+      case WagerTransactionKind.Win:
+      case WagerTransactionKind.Opening:
+        return this.credit(transaction, wallet, money);
 
-        case WagerTransactionKind.Loss:
-          transaction.markProcessed();
-          return undefined;
+      case WagerTransactionKind.Loss:
+        transaction.markProcessed();
+        return undefined;
 
-        default:
-          // SUPPORTED_KINDS já barrou REFUND/ROLLBACK antes de chegar aqui.
-          throw new UnsupportedWagerKindError(transaction.kind);
-      }
+      case WagerTransactionKind.Refund:
+      case WagerTransactionKind.Rollback:
+        return this.applyReversal(transaction, wallet, em);
+
+      default:
+        // SUPPORTED_KINDS já barra qualquer coisa fora daqui.
+        throw new UnsupportedWagerKindError(transaction.kind);
+    }
+  }
+
+  /**
+   * Resolve `(providerId, referenceExternalTransactionId)` e aplica o
+   * inverso do que a transação referenciada fez (regras 1-5 e 9, seção
+   * 7). Referência ausente vira `PendingReference`, não erro — o worker
+   * (seção 7.1) tenta de novo depois.
+   */
+  private async applyReversal(
+    transaction: WagerTransaction,
+    wallet: Wallet,
+    em: EntityManager,
+  ): Promise<WalletLedgerEntry | undefined> {
+    const referenceExternalTransactionId = transaction.referenceExternalTransactionId;
+    if (!referenceExternalTransactionId) {
+      // WagerTransaction.create() já exige isso pra Refund/Rollback —
+      // defensivo, não deveria ser alcançável.
+      transaction.markRejected('REFERENCE_NOT_FOUND');
+      return undefined;
+    }
+
+    const referenced = await this.wagerTransactionRepository.findByProviderAndExternalId(
+      transaction.providerId,
+      referenceExternalTransactionId,
+      em,
+    );
+
+    if (!referenced) {
+      transaction.markPendingReference();
+      return undefined;
+    }
+
+    // Regra 2: mesmo provider (já garantido pela busca), player, wallet, moeda, rodada.
+    if (
+      referenced.playerId !== transaction.playerId ||
+      referenced.walletId !== transaction.walletId ||
+      referenced.roundId !== transaction.roundId ||
+      referenced.money.currencyCode !== transaction.money.currencyCode
+    ) {
+      transaction.markRejected('REFERENCE_OUT_OF_SCOPE');
+      return undefined;
+    }
+
+    // Só transação já PROCESSADA pode ser revertida.
+    if (referenced.status !== WagerTransactionStatus.Processed) {
+      transaction.markRejected('REFERENCE_NOT_PROCESSED');
+      return undefined;
+    }
+
+    // Regra 3: REFUND só referencia BET; ROLLBACK referencia BET/WIN/REFUND.
+    if (!ALLOWED_REFERENCE_KINDS[transaction.kind].has(referenced.kind)) {
+      transaction.markRejected('REFERENCE_KIND_NOT_ALLOWED');
+      return undefined;
+    }
+
+    // Regra 5: valor idêntico ao da referência — reversão parcial fora de escopo.
+    if (!transaction.money.equals(referenced.money)) {
+      transaction.markRejected('REFERENCE_AMOUNT_MISMATCH');
+      return undefined;
+    }
+
+    // Regra 4: a mesma referência não pode ser revertida duas vezes pelo
+    // MESMO tipo de operação (um REFUND e um ROLLBACK sobre o mesmo BET
+    // são coisas distintas, cada um vale uma vez).
+    const alreadyReversed = await this.wagerTransactionRepository.existsProcessedReversal(
+      referenced.id,
+      transaction.kind,
+      em,
+    );
+    if (alreadyReversed) {
+      transaction.markRejected('REFERENCE_ALREADY_REVERSED');
+      return undefined;
+    }
+
+    transaction.resolveReference(referenced.id);
+
+    // BET foi débito -> reverter credita. WIN/REFUND foram crédito -> reverter debita.
+    const isCreditReversal = referenced.kind === WagerTransactionKind.Bet;
+
+    try {
+      return isCreditReversal
+        ? this.credit(transaction, wallet, transaction.money)
+        : this.debit(transaction, wallet, transaction.money);
     } catch (error) {
       if (error instanceof InsufficientBalanceError) {
-        transaction.markRejected('INSUFFICIENT_BALANCE');
+        // Regra 9: código DISTINTO do de aposta sem saldo — mesma "falta
+        // de saldo" na superfície, situação operacionalmente diferente.
+        transaction.markRejected('REVERSAL_WOULD_OVERDRAW');
         return undefined;
       }
       throw error;
@@ -254,9 +443,9 @@ export class ProcessWagerTransactionUseCase {
   }
 
   /**
-   * Enfileira os eventos mínimos exigidos (seção 11): Processed/Rejected
-   * sempre; WalletBalanceChanged só quando o lançamento existe (ou seja,
-   * só quando o saldo mudou de fato — nunca pra LOSS/rejeição).
+   * Enfileira os eventos mínimos exigidos (seção 11): Processed/Rejected/
+   * PendingReference conforme o status final; WalletBalanceChanged só
+   * quando o lançamento existe (só quando o saldo mudou de fato).
    */
   private async enqueueEvents(
     transaction: WagerTransaction,
@@ -265,22 +454,39 @@ export class ProcessWagerTransactionUseCase {
     ctx: IntegrationEventContext,
     em: EntityManager,
   ): Promise<void> {
-    const events: IntegrationEvent<unknown>[] =
-      transaction.status === WagerTransactionStatus.Processed
-        ? [
-            WagerTransactionProcessedEvent.from({
-              eventId: this.idGenerator.next(),
-              transaction,
-              ctx,
-            }),
-          ]
-        : [
-            WagerTransactionRejectedEvent.from({
-              eventId: this.idGenerator.next(),
-              transaction,
-              ctx,
-            }),
-          ];
+    const events: IntegrationEvent<unknown>[] = [];
+
+    switch (transaction.status) {
+      case WagerTransactionStatus.Processed:
+        events.push(
+          WagerTransactionProcessedEvent.from({
+            eventId: this.idGenerator.next(),
+            transaction,
+            ctx,
+          }),
+        );
+        break;
+      case WagerTransactionStatus.Rejected:
+        events.push(
+          WagerTransactionRejectedEvent.from({
+            eventId: this.idGenerator.next(),
+            transaction,
+            ctx,
+          }),
+        );
+        break;
+      case WagerTransactionStatus.PendingReference:
+        events.push(
+          WagerTransactionPendingReferenceEvent.from({
+            eventId: this.idGenerator.next(),
+            transaction,
+            ctx,
+          }),
+        );
+        break;
+      default:
+        break;
+    }
 
     if (ledgerEntry) {
       events.push(
@@ -305,10 +511,10 @@ export class ProcessWagerTransactionUseCase {
    * Saldo "observado naquele momento" (regra 7): pra transação
    * PROCESSED com lançamento, é o `balanceAfter` do próprio ledger — a
    * razão de existir de um ledger imutável é justamente poder reconstruir
-   * saldo histórico sem recomputar nada. Pra REJECTED (ou PROCESSED sem
-   * lançamento, caso de LOSS) não há mudança de saldo, então o saldo
-   * atual da wallet já é o valor correto — simplificação documentada
-   * (não existe campo de snapshot de saldo na WagerTransaction em si).
+   * saldo histórico sem recomputar nada. Sem lançamento (LOSS, rejeição,
+   * PendingReference) não há mudança de saldo, então o saldo atual da
+   * wallet já é o valor correto — simplificação documentada (não existe
+   * campo de snapshot de saldo na WagerTransaction em si).
    *
    * Replay não reenfileira evento nenhum — o outbox já tem o que precisa
    * da vez em que a transação foi processada de verdade.
@@ -322,23 +528,23 @@ export class ProcessWagerTransactionUseCase {
         ? await this.walletLedgerEntryRepository.findByTransactionId(transaction.id, em)
         : null;
 
-    let balance: Money;
-    if (entry) {
-      balance = entry.balanceAfter;
-    } else {
-      const wallet = await this.walletRepository.findById(transaction.walletId, em);
-      if (!wallet) {
-        throw new WalletNotFoundError(transaction.walletId);
-      }
-      balance = wallet.currentBalance;
+    const wallet = await this.walletRepository.findById(transaction.walletId, em);
+    if (!wallet) {
+      throw new WalletNotFoundError(transaction.walletId);
     }
 
-    return {
-      transactionId: transaction.id,
-      status: transaction.status,
-      balance: { amount: balance.toString(), currency: balance.currencyCode },
-      idempotentReplay: true,
-      failureCode: transaction.failureCode,
-    };
+    if (entry) {
+      // Espelha o saldo histórico do ledger na resposta sem alterar o
+      // objeto wallet de verdade — via reconstitute em cima do mesmo id.
+      const historical = Wallet.rehydrate({
+        id: wallet.id,
+        playerId: wallet.playerId,
+        balance: entry.balanceAfter,
+        version: wallet.currentVersion,
+      });
+      return this.toResult(transaction, historical, true);
+    }
+
+    return this.toResult(transaction, wallet, true);
   }
 }

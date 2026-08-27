@@ -10,6 +10,8 @@ class FakeEntityManager {
   async transactional<T>(cb: (em: unknown) => Promise<T>): Promise<T> {
     return cb(this);
   }
+
+  async flush(): Promise<void> {}
 }
 
 class SequentialIdGenerator implements IdGenerator {

@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Logger } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { AppModule } from './app.module';
@@ -10,6 +10,14 @@ async function bootstrap(): Promise<void> {
   });
 
   app.enableShutdownHooks();
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true, // derruba campo que não está no DTO
+      forbidNonWhitelisted: true, // e rejeita a requisição em vez de ignorar silenciosamente
+      transform: true, // converte payload plano pra instância de classe (Type() dos DTOs aninhados depende disso)
+    }),
+  );
 
   // MikroORM.init() (rodado pelo MikroOrmModule) não conecta mais
   // automaticamente — só descobre entidades e cria o EntityManager. Sem

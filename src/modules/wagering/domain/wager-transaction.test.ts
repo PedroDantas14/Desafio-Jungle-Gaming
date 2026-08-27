@@ -100,6 +100,18 @@ describe('WagerTransaction', () => {
     expect(tx.status).toBe(WagerTransactionStatus.Processed);
   });
 
+  it('markPendingReference é idempotente (retry do worker sem a referência ainda ter aparecido)', () => {
+    const tx = createBet({
+      kind: WagerTransactionKind.Refund,
+      referenceExternalTransactionId: 'transaction-100',
+    });
+    tx.markPendingReference();
+    // Um segundo retry ainda sem a referência não é uma transição de
+    // verdade (PendingReference -> PendingReference) — não pode lançar.
+    expect(() => tx.markPendingReference()).not.toThrow();
+    expect(tx.status).toBe(WagerTransactionStatus.PendingReference);
+  });
+
   it('esgotada a PendingReference, rejeita com REFERENCE_NOT_FOUND', () => {
     const tx = createBet({
       kind: WagerTransactionKind.Refund,

@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/postgresql';
-import { WalletLedgerEntryRepository } from '../application/ports/wallet-ledger-entry.repository';
+import {
+  type LedgerPage,
+  WalletLedgerEntryRepository,
+} from '../application/ports/wallet-ledger-entry.repository';
 import { WalletLedgerEntry } from '../domain/wallet-ledger-entry';
 import { WalletLedgerEntryMapper } from './wallet-ledger-entry.mapper';
 import { WalletLedgerEntryOrmEntity } from './wallet-ledger-entry.orm-entity';
@@ -22,5 +25,38 @@ export class WalletLedgerEntryRepositoryMikroOrm implements WalletLedgerEntryRep
   ): Promise<WalletLedgerEntry | null> {
     const row = await em.findOne(WalletLedgerEntryOrmEntity, { transactionId });
     return row ? WalletLedgerEntryMapper.toDomain(row) : null;
+  }
+
+  async findPage(
+    walletId: string,
+    options: { cursor?: string; limit: number },
+    em: EntityManager,
+  ): Promise<LedgerPage> {
+    const where = options.cursor ? { walletId, id: { $lt: options.cursor } } : { walletId };
+
+    // Busca um a mais que o limite pra saber se tem próxima página, sem
+    // um COUNT(*) separado.
+    const rows = await em.find(WalletLedgerEntryOrmEntity, where, {
+      orderBy: { id: 'desc' },
+      limit: options.limit + 1,
+    });
+
+    const hasMore = rows.length > options.limit;
+    const page = hasMore ? rows.slice(0, options.limit) : rows;
+    const lastRow = page[page.length - 1];
+
+    return {
+      entries: page.map((row) => WalletLedgerEntryMapper.toDomain(row)),
+      nextCursor: hasMore && lastRow ? lastRow.id : undefined,
+    };
+  }
+
+  async findAllByWalletId(walletId: string, em: EntityManager): Promise<WalletLedgerEntry[]> {
+    const rows = await em.find(
+      WalletLedgerEntryOrmEntity,
+      { walletId },
+      { orderBy: { id: 'asc' } },
+    );
+    return rows.map((row) => WalletLedgerEntryMapper.toDomain(row));
   }
 }

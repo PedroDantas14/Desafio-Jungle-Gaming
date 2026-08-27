@@ -5,6 +5,7 @@ import { WagerTransactionRepository } from './application/ports/wager-transactio
 import { ProcessWagerTransactionUseCase } from './application/process-wager-transaction.use-case';
 import { WagerTransactionRepositoryMikroOrm } from './infrastructure/wager-transaction.repository.mikro-orm';
 import { WagerTransactionConsumer } from './infrastructure/wager-transaction.consumer';
+import { PendingReferenceReprocessorWorker } from './infrastructure/pending-reference-reprocessor.worker';
 
 @Module({
   imports: [WalletModule, MessagingModule],
@@ -12,7 +13,8 @@ import { WagerTransactionConsumer } from './infrastructure/wager-transaction.con
     ProcessWagerTransactionUseCase,
     { provide: WagerTransactionRepository, useClass: WagerTransactionRepositoryMikroOrm },
     WagerTransactionConsumer,
+    PendingReferenceReprocessorWorker,
   ],
-  exports: [ProcessWagerTransactionUseCase],
+  exports: [ProcessWagerTransactionUseCase, WagerTransactionRepository],
 })
 export class WageringModule {}

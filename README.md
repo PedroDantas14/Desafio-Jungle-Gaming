@@ -52,20 +52,45 @@ A API sobe em `http://localhost:3000`.
 | `bun run migration:create` | Gera uma nova migration a partir do diff das entidades |
 | `bun run migration:up` / `migration:down` | Aplica / reverte migrations |
 
+## Endpoints
+
+```
+POST   /wallets                                                     { playerId, currency, initialBalance? }
+GET    /wallets/:walletId
+GET    /wallets/:walletId/ledger?cursor=&limit=                     paginação por cursor (id, UUIDv7 — ordenável por tempo)
+POST   /wallets/:walletId/reconciliation                            recalcula o saldo a partir do ledger
+POST   /wagering/transactions                                       header Idempotency-Key: "providerId:externalId"
+GET    /wagering/transactions/:transactionId
+GET    /providers/:providerId/wagering/transactions/:externalTransactionId
+GET    /health/live
+GET    /health/ready
+```
+
 ## Health checks
 
 - `GET /health/live` — o processo está de pé (sem checar dependências externas)
 - `GET /health/ready` — a instância consegue de fato servir tráfego (checa conexão com o Postgres)
+
+## Autenticação
+
+Guard (`BearerAuthGuard`) valida `Authorization: Bearer <jwt>` contra o JWKS
+de um Identity Provider externo (nunca emite token, só valida — seção 2 do
+desafio pede integração com IdP, nunca auth artesanal). **Decisão de
+escopo**: autenticação não vale pontos e não deve competir com correção
+financeira/concorrência/idempotência — por isso, sem `AUTH_JWKS_URI`
+configurado no `.env`, o guard fica desabilitado (loga aviso, deixa
+passar). Configurar `AUTH_JWKS_URI` + `AUTH_ISSUER` contra um IdP real
+(Keycloak, Zitadel, etc.) liga a validação de verdade.
 
 ## Status atual
 
 - [x] Scaffolding (NestJS + Bun + Docker Compose + health checks)
 - [x] Domínio (Money, Wallet, WagerTransaction, WalletLedgerEntry)
 - [x] Persistência (MikroORM + migrations com constraints no schema)
-- [x] Caso de uso central + concorrência por `walletId` (BET/WIN/LOSS/OPENING; REFUND/ROLLBACK na Parte 7)
+- [x] Caso de uso central + concorrência por `walletId` (BET/WIN/LOSS/OPENING/REFUND/ROLLBACK)
 - [x] Inbox/Outbox + SQS (produtor: outbox → `integration-events.fifo`; consumidor: `wager-transactions.fifo` → use case)
-- [ ] API (controllers, DTOs, autenticação)
-- [ ] REFUND / ROLLBACK / `PENDING_REFERENCE` + worker de reprocessamento
+- [x] API (controllers, DTOs, autenticação — ver nota abaixo)
+- [x] REFUND / ROLLBACK / `PENDING_REFERENCE` + worker de reprocessamento
 - [ ] Observabilidade
 - [ ] Testes de integração/concorrência
 - [ ] `ARCHITECTURE.md`

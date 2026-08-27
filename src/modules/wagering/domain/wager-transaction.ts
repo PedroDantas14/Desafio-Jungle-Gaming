@@ -43,7 +43,10 @@ export type FailureCode =
   // Referência já revertida uma vez pelo mesmo tipo de operação (regra 4).
   | 'REFERENCE_ALREADY_REVERSED'
   // Valor do REFUND/ROLLBACK diferente do valor da referência (regra 5).
-  | 'REFERENCE_AMOUNT_MISMATCH';
+  | 'REFERENCE_AMOUNT_MISMATCH'
+  // Referência existe mas ainda não está PROCESSED (ainda Pending, ou já
+  // terminou Rejected/Failed) — só transação processada pode ser revertida.
+  | 'REFERENCE_NOT_PROCESSED';
 
 // REFUND credita de volta um BET processado específico; ROLLBACK reverte
 // uma transação processada específica — ambos não fazem sentido sem saber
@@ -227,7 +230,18 @@ export class WagerTransaction {
     this._processedAt = new Date();
   }
 
+  /**
+   * Idempotente: `applyReversal` chama isso tanto na primeira tentativa
+   * (Pending -> PendingReference) quanto num retry do worker (seção 7.1)
+   * onde a referência ainda não apareceu — nesse segundo caso o status já
+   * É PendingReference, e ALLOWED_TRANSITIONS não tem PendingReference nele
+   * mesmo (não é uma transição de verdade). Sem esse early-return, um
+   * retry sem sucesso lançaria InvalidStateTransitionError.
+   */
   markPendingReference(): void {
+    if (this._status === WagerTransactionStatus.PendingReference) {
+      return;
+    }
     this.transitionTo(WagerTransactionStatus.PendingReference);
   }
 

@@ -8,6 +8,7 @@ import { WalletLedgerEntryRepositoryMikroOrm } from '../../wallet/infrastructure
 import { WalletLedgerEntryOrmEntity } from '../../wallet/infrastructure/wallet-ledger-entry.orm-entity';
 import { WalletRepositoryMikroOrm } from '../../wallet/infrastructure/wallet.repository.mikro-orm';
 import { WagerTransactionKind, WagerTransactionStatus } from '../domain/wager-transaction';
+import { PendingReferenceReprocessorWorker } from '../infrastructure/pending-reference-reprocessor.worker';
 import { WagerTransactionRepositoryMikroOrm } from '../infrastructure/wager-transaction.repository.mikro-orm';
 import {
   type ProcessWagerTransactionCommand,
@@ -30,6 +31,8 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
   let createWalletUseCase: CreateWalletUseCase;
   let processWagerTransactionUseCase: ProcessWagerTransactionUseCase;
   let walletRepository: WalletRepositoryMikroOrm;
+  let wagerTransactionRepository: WagerTransactionRepositoryMikroOrm;
+  let pendingReferenceReprocessorWorker: PendingReferenceReprocessorWorker;
   // O banco não é resetado entre execuções da suíte — sem isso, um
   // externalTransactionId fixo tipo "tx-duplicate" colide com a mesma
   // idempotencyKey de uma rodada anterior, e o teste vira replay de uma
@@ -50,7 +53,7 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
     // pelo container do Nest, pra manter o teste rápido e direto.
     walletRepository = new WalletRepositoryMikroOrm();
     const walletLedgerEntryRepository = new WalletLedgerEntryRepositoryMikroOrm();
-    const wagerTransactionRepository = new WagerTransactionRepositoryMikroOrm();
+    wagerTransactionRepository = new WagerTransactionRepositoryMikroOrm();
     const outboxMessageRepository = new OutboxMessageRepositoryMikroOrm();
     const idGenerator = new Uuidv7IdGenerator();
 
@@ -62,6 +65,11 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
       wagerTransactionRepository,
       outboxMessageRepository,
       idGenerator,
+    );
+    pendingReferenceReprocessorWorker = new PendingReferenceReprocessorWorker(
+      orm.em,
+      wagerTransactionRepository,
+      processWagerTransactionUseCase,
     );
   });
 
@@ -102,6 +110,7 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
   function bet(
     walletId: string,
     externalTransactionIdSuffix: string,
+    overrides: Partial<ProcessWagerTransactionCommand> = {},
   ): ProcessWagerTransactionCommand {
     const externalTransactionId = `${runId}:${externalTransactionIdSuffix}`;
     return {
@@ -116,7 +125,47 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
       kind: WagerTransactionKind.Bet,
       amount: '80.00',
       currency: 'BRL',
+      ...overrides,
     };
+  }
+
+  // REFUND/ROLLBACK (regra 2, seção 7): mesmo player/wallet/rodada/moeda/
+  // valor da transação referenciada — monta a partir do comando original
+  // pra garantir que os dois nunca desalinham.
+  function reversal(
+    kind: typeof WagerTransactionKind.Refund | typeof WagerTransactionKind.Rollback,
+    externalTransactionIdSuffix: string,
+    reference: ProcessWagerTransactionCommand,
+  ): ProcessWagerTransactionCommand {
+    const externalTransactionId = `${runId}:${externalTransactionIdSuffix}`;
+    return {
+      providerId: reference.providerId,
+      externalTransactionId,
+      idempotencyKey: `integration-test:${externalTransactionId}`,
+      payloadHash: 'n/a',
+      walletId: reference.walletId,
+      playerId: reference.playerId,
+      roundId: reference.roundId,
+      gameId: reference.gameId,
+      kind,
+      amount: reference.amount,
+      currency: reference.currency,
+      referenceExternalTransactionId: reference.externalTransactionId,
+    };
+  }
+
+  // Só pra testar o ramo de expiração por TTL do worker (seção 7.1) sem
+  // esperar 10 minutos de verdade — MikroORM não expõe um jeito de
+  // sobrescrever `createdAt` depois de `create()`, então a única forma
+  // honesta é voltar o relógio da linha direto no Postgres.
+  async function backdateCreatedAt(transactionId: string, msAgo: number): Promise<void> {
+    await orm.em
+      .fork()
+      .getConnection()
+      .execute(
+        `update "wager_transactions" set "created_at" = now() - (? * interval '1 millisecond') where "id" = ?`,
+        [msAgo, transactionId],
+      );
   }
 
   it(
@@ -206,5 +255,107 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
 
     const debits = await countDebits(walletId);
     expect(debits).toBe(1);
+  });
+
+  describe('REFUND/ROLLBACK e PENDING_REFERENCE (Parte 7) — Postgres real', () => {
+    it('REFUND de um BET processado credita de volta o valor exato', async () => {
+      const walletId = await openFundedWallet('100.00');
+      const betCommand = bet(walletId, 'bet-refund-happy');
+
+      await processWagerTransactionUseCase.execute(betCommand);
+      expect((await loadWallet(walletId))?.currentBalance.toString()).toBe('20.00');
+
+      const refundResult = await processWagerTransactionUseCase.execute(
+        reversal(WagerTransactionKind.Refund, 'refund-happy', betCommand),
+      );
+
+      expect(refundResult.status).toBe(WagerTransactionStatus.Processed);
+      expect((await loadWallet(walletId))?.currentBalance.toString()).toBe('100.00');
+      // O REFUND é um crédito, não um débito — a contagem de débitos não muda.
+      expect(await countDebits(walletId)).toBe(1);
+    });
+
+    it('ROLLBACK de um WIN processado debita de volta o valor exato', async () => {
+      const walletId = await openFundedWallet('100.00');
+      const winCommand = bet(walletId, 'win-rollback-happy', { kind: WagerTransactionKind.Win });
+
+      await processWagerTransactionUseCase.execute(winCommand);
+      expect((await loadWallet(walletId))?.currentBalance.toString()).toBe('180.00');
+
+      const rollbackResult = await processWagerTransactionUseCase.execute(
+        reversal(WagerTransactionKind.Rollback, 'rollback-happy', winCommand),
+      );
+
+      expect(rollbackResult.status).toBe(WagerTransactionStatus.Processed);
+      expect((await loadWallet(walletId))?.currentBalance.toString()).toBe('100.00');
+    });
+
+    it('REFUND que chega antes do BET fica PENDING_REFERENCE e resolve quando a referência aparece (retryPendingReference)', async () => {
+      const walletId = await openFundedWallet('100.00');
+      const betCommand = bet(walletId, 'bet-late-arrival');
+
+      const refundResult = await processWagerTransactionUseCase.execute(
+        reversal(WagerTransactionKind.Refund, 'refund-early-arrival', betCommand),
+      );
+      expect(refundResult.status).toBe(WagerTransactionStatus.PendingReference);
+
+      // A referência "aparece" depois.
+      await processWagerTransactionUseCase.execute(betCommand);
+      expect((await loadWallet(walletId))?.currentBalance.toString()).toBe('20.00');
+
+      await orm.em.transactional((em) =>
+        processWagerTransactionUseCase.retryPendingReference(refundResult.transactionId, em),
+      );
+
+      const resolved = await wagerTransactionRepository.findById(
+        refundResult.transactionId,
+        orm.em.fork(),
+      );
+      expect(resolved?.status).toBe(WagerTransactionStatus.Processed);
+      expect((await loadWallet(walletId))?.currentBalance.toString()).toBe('100.00');
+    });
+
+    it('PendingReferenceReprocessorWorker.reprocessBatch resolve pendências cuja referência já apareceu', async () => {
+      const walletId = await openFundedWallet('100.00');
+      const betCommand = bet(walletId, 'bet-worker-happy');
+
+      const refundResult = await processWagerTransactionUseCase.execute(
+        reversal(WagerTransactionKind.Refund, 'refund-worker-happy', betCommand),
+      );
+      expect(refundResult.status).toBe(WagerTransactionStatus.PendingReference);
+
+      await processWagerTransactionUseCase.execute(betCommand);
+
+      await pendingReferenceReprocessorWorker.reprocessBatch(50);
+
+      const resolved = await wagerTransactionRepository.findById(
+        refundResult.transactionId,
+        orm.em.fork(),
+      );
+      expect(resolved?.status).toBe(WagerTransactionStatus.Processed);
+    });
+
+    it('PendingReferenceReprocessorWorker.reprocessBatch expira PENDING_REFERENCE mais velha que o TTL', async () => {
+      const walletId = await openFundedWallet('100.00');
+      const neverArrivingBet = bet(walletId, 'bet-never-arrives');
+
+      const refundResult = await processWagerTransactionUseCase.execute(
+        reversal(WagerTransactionKind.Refund, 'refund-never-arrives', neverArrivingBet),
+      );
+      expect(refundResult.status).toBe(WagerTransactionStatus.PendingReference);
+
+      // Volta o relógio da linha 11 minutos — passa do TTL de 10 minutos
+      // sem precisar esperar de verdade.
+      await backdateCreatedAt(refundResult.transactionId, 11 * 60 * 1_000);
+
+      await pendingReferenceReprocessorWorker.reprocessBatch(50);
+
+      const expired = await wagerTransactionRepository.findById(
+        refundResult.transactionId,
+        orm.em.fork(),
+      );
+      expect(expired?.status).toBe(WagerTransactionStatus.Rejected);
+      expect(expired?.failureCode).toBe('REFERENCE_NOT_FOUND');
+    });
   });
 });

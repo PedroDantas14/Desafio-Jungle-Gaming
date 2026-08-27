@@ -3,10 +3,10 @@ import {
   toMoneyEmbeddable,
 } from '../../../shared/infrastructure/money.mapper';
 import {
-  FailureCode,
+  type FailureCode,
   WagerTransaction,
-  WagerTransactionKind,
-  WagerTransactionStatus,
+  type WagerTransactionKind,
+  type WagerTransactionStatus,
 } from '../domain/wager-transaction';
 import { WagerTransactionOrmEntity } from './wager-transaction.orm-entity';
 

@@ -20,6 +20,12 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
+    // Bun transpila cada arquivo isoladamente (sem checagem de tipos
+    // completa) — um import de puro tipo sem `import type` vira um
+    // import de valor no JS emitido e quebra em runtime (não é erro de
+    // tsc, só aparece rodando). verbatimModuleSyntax faz o tsc barrar
+    // isso em tempo de typecheck.
+    "verbatimModuleSyntax": true,
 
     "declaration": false,
     "sourceMap": true,

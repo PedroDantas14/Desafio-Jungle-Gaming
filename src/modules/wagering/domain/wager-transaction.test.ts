@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { Money } from '../../../shared/domain/money';
 import {
-  CreateWagerTransactionParams,
+  type CreateWagerTransactionParams,
   WagerTransaction,
   WagerTransactionKind,
   WagerTransactionStatus,

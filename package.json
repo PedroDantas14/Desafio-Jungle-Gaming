@@ -15,7 +15,8 @@
     "lint": "eslint \"src/**/*.ts\"",
     "lint:fix": "eslint \"src/**/*.ts\" --fix",
     "format": "prettier --write \"src/**/*.ts\"",
-    "test": "bun test",
+    "test": "bun test --path-ignore-patterns '**/*.integration.test.ts'",
+    "test:integration": "bun test integration",
     "migration:create": "mikro-orm migration:create",
     "migration:up": "mikro-orm migration:up",
     "migration:down": "mikro-orm migration:down"

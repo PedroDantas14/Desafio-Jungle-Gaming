@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 import { MikroORM } from '@mikro-orm/postgresql';
 import mikroOrmConfig from '../../../config/mikro-orm.config';
 import { Uuidv7IdGenerator } from '../../../shared/infrastructure/uuidv7-id-generator';
+import { OutboxMessageRepositoryMikroOrm } from '../../messaging/infrastructure/outbox-message.repository.mikro-orm';
 import { CreateWalletUseCase } from '../../wallet/application/create-wallet.use-case';
 import { WalletLedgerEntryRepositoryMikroOrm } from '../../wallet/infrastructure/wallet-ledger-entry.repository.mikro-orm';
 import { WalletLedgerEntryOrmEntity } from '../../wallet/infrastructure/wallet-ledger-entry.orm-entity';
@@ -50,6 +51,7 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
     walletRepository = new WalletRepositoryMikroOrm();
     const walletLedgerEntryRepository = new WalletLedgerEntryRepositoryMikroOrm();
     const wagerTransactionRepository = new WagerTransactionRepositoryMikroOrm();
+    const outboxMessageRepository = new OutboxMessageRepositoryMikroOrm();
     const idGenerator = new Uuidv7IdGenerator();
 
     createWalletUseCase = new CreateWalletUseCase(orm.em, walletRepository, idGenerator);
@@ -58,6 +60,7 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
       walletRepository,
       walletLedgerEntryRepository,
       wagerTransactionRepository,
+      outboxMessageRepository,
       idGenerator,
     );
   });

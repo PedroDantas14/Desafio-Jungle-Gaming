@@ -10,6 +10,12 @@ import {
 const MONEY_PATTERN = /^(-?)(\d+)\.(\d{2})$/;
 const CURRENCY_PATTERN = /^[A-Z]{3}$/;
 
+/** Forma serializável de Money — string decimal, nunca number. */
+export interface MoneyProps {
+  amount: string;
+  currency: string;
+}
+
 /**
  * Value object monetário imutável.
  *
@@ -80,6 +86,15 @@ export class Money {
   /** Permite que `JSON.stringify` serialize Money na forma de string de escala fixa. */
   toJSON(): string {
     return this.toString();
+  }
+
+  /**
+   * Forma "plana" (`MoneyProps`) usada no payload de eventos de
+   * integração (seção 11 do desafio: "data carrega MoneyProps — string
+   * decimal — nunca instância Money").
+   */
+  toProps(): MoneyProps {
+    return { amount: this.toString(), currency: this.currency };
   }
 
   add(other: Money): Money {

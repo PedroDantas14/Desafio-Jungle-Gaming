@@ -26,7 +26,7 @@ cp .env.example .env
 bun install
 docker compose up -d postgres localstack
 bun run migration:up
-bun run start:dev
+bun run start:dev  # cria/valida as filas SQS no LocalStack sozinho, no boot
 ```
 
 A API sobe em `http://localhost:3000`.
@@ -63,7 +63,7 @@ A API sobe em `http://localhost:3000`.
 - [x] Domínio (Money, Wallet, WagerTransaction, WalletLedgerEntry)
 - [x] Persistência (MikroORM + migrations com constraints no schema)
 - [x] Caso de uso central + concorrência por `walletId` (BET/WIN/LOSS/OPENING; REFUND/ROLLBACK na Parte 7)
-- [ ] Inbox/Outbox + SQS
+- [x] Inbox/Outbox + SQS (produtor: outbox → `integration-events.fifo`; consumidor: `wager-transactions.fifo` → use case)
 - [ ] API (controllers, DTOs, autenticação)
 - [ ] REFUND / ROLLBACK / `PENDING_REFERENCE` + worker de reprocessamento
 - [ ] Observabilidade

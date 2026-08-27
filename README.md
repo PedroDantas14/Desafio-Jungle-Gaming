@@ -49,7 +49,7 @@ A API sobe em `http://localhost:3000`.
 ## Status atual
 
 - [x] Scaffolding (NestJS + Bun + Docker Compose + health checks)
-- [ ] Domínio (Money, Wallet, WagerTransaction, WalletLedgerEntry)
+- [x] Domínio (Money, Wallet, WagerTransaction, WalletLedgerEntry)
 - [ ] Persistência (MikroORM + migrations com constraints no schema)
 - [ ] Caso de uso central + concorrência por `walletId`
 - [ ] Inbox/Outbox + SQS

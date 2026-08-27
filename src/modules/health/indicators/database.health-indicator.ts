@@ -3,10 +3,11 @@ import { HealthCheckError, HealthIndicator, HealthIndicatorResult } from '@nestj
 import { Pool } from 'pg';
 
 /**
- * Naive connectivity check via a raw `pg` pool — no ORM involved yet.
- * Will be replaced by a MikroORM-backed indicator once the persistence
- * layer (entities/migrations) lands, reusing the app's own connection
- * instead of opening a second pool just for health checks.
+ * Checagem de conectividade simples via pool `pg` cru — ainda sem ORM.
+ * Vai ser substituído por um indicator baseado em MikroORM assim que a
+ * camada de persistência (entidades/migrations) for implementada,
+ * reaproveitando a conexão da própria aplicação em vez de abrir um
+ * segundo pool só pra health check.
  */
 @Injectable()
 export class DatabaseHealthIndicator extends HealthIndicator implements OnModuleDestroy {

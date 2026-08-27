@@ -10,9 +10,9 @@ export class HealthController {
   ) {}
 
   /**
-   * Liveness: only proves the process is up and responding to HTTP.
-   * Must never check external dependencies — a flaky DB should not get the
-   * process killed by an orchestrator's liveness probe.
+   * Liveness: só prova que o processo está de pé e respondendo HTTP.
+   * Nunca deve checar dependências externas — um banco instável não pode
+   * fazer o orquestrador matar o processo por causa da liveness probe.
    */
   @Get('live')
   @HealthCheck()
@@ -21,9 +21,9 @@ export class HealthController {
   }
 
   /**
-   * Readiness: proves the instance can actually serve traffic right now.
-   * Checks the database connection — will be extended with SQS/LocalStack
-   * connectivity once the messaging layer lands.
+   * Readiness: prova que a instância consegue de fato servir tráfego agora.
+   * Checa a conexão com o banco — vai ser estendida com conectividade
+   * SQS/LocalStack assim que a camada de mensageria for implementada.
    */
   @Get('ready')
   @HealthCheck()

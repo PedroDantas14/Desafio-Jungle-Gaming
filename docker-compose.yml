@@ -34,10 +34,10 @@ services:
       timeout: 5s
       retries: 10
 
-  # Single instance for now. Once the concurrency scenarios are in place,
-  # this gets scaled with `docker compose up --scale app=3` — at that point
-  # the fixed host port below will need to move to a load balancer in front
-  # instead of a direct host mapping.
+  # Instância única por enquanto. Quando os cenários de concorrência
+  # estiverem prontos, isso escala com `docker compose up --scale app=3` —
+  # nesse ponto a porta fixa do host abaixo vai precisar virar um load
+  # balancer na frente, em vez de mapeamento direto de porta.
   app:
     build:
       context: .

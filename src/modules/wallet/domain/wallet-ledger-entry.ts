@@ -1,4 +1,4 @@
-import { Money } from '../../../shared/domain/money';
+import { type Money } from '../../../shared/domain/money';
 import { InvalidLedgerEntryError } from './wallet.errors';
 
 export enum LedgerDirection {

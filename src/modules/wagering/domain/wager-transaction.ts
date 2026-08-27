@@ -1,4 +1,4 @@
-import { Money } from '../../../shared/domain/money';
+import { type Money } from '../../../shared/domain/money';
 import { InvalidStateTransitionError, InvalidWagerTransactionError } from './wagering.errors';
 
 export enum WagerTransactionKind {

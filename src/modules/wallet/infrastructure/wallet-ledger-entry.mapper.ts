@@ -2,7 +2,7 @@ import {
   fromMoneyEmbeddable,
   toMoneyEmbeddable,
 } from '../../../shared/infrastructure/money.mapper';
-import { LedgerDirection, WalletLedgerEntry } from '../domain/wallet-ledger-entry';
+import { type LedgerDirection, WalletLedgerEntry } from '../domain/wallet-ledger-entry';
 import { WalletLedgerEntryOrmEntity } from './wallet-ledger-entry.orm-entity';
 
 export class WalletLedgerEntryMapper {

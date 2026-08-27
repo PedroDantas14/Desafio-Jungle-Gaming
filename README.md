@@ -47,7 +47,8 @@ A API sobe em `http://localhost:3000`.
 | `bun run typecheck` | Checagem de tipos sem emitir arquivos |
 | `bun run lint` / `lint:fix` | ESLint |
 | `bun run format` | Prettier |
-| `bun test` | Testes (Bun test runner) |
+| `bun test` | Testes unitários (Bun test runner) |
+| `bun run test:integration` | Testes de integração — exige Postgres real (`docker compose up -d postgres` + `migration:up`) |
 | `bun run migration:create` | Gera uma nova migration a partir do diff das entidades |
 | `bun run migration:up` / `migration:down` | Aplica / reverte migrations |
 
@@ -61,7 +62,7 @@ A API sobe em `http://localhost:3000`.
 - [x] Scaffolding (NestJS + Bun + Docker Compose + health checks)
 - [x] Domínio (Money, Wallet, WagerTransaction, WalletLedgerEntry)
 - [x] Persistência (MikroORM + migrations com constraints no schema)
-- [ ] Caso de uso central + concorrência por `walletId`
+- [x] Caso de uso central + concorrência por `walletId` (BET/WIN/LOSS/OPENING; REFUND/ROLLBACK na Parte 7)
 - [ ] Inbox/Outbox + SQS
 - [ ] API (controllers, DTOs, autenticação)
 - [ ] REFUND / ROLLBACK / `PENDING_REFERENCE` + worker de reprocessamento

@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { MikroORM } from '@mikro-orm/postgresql';
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
@@ -9,6 +10,25 @@ async function bootstrap(): Promise<void> {
   });
 
   app.enableShutdownHooks();
+
+  // MikroORM.init() (rodado pelo MikroOrmModule) não conecta mais
+  // automaticamente — só descobre entidades e cria o EntityManager. Sem
+  // isso, checkConnection() do health indicator nunca sai de "Connection
+  // not established" mesmo com o Postgres de pé. Não derruba o boot se
+  // falhar: /health/ready reporta down até o banco ficar acessível.
+  const orm = app.get(MikroORM);
+  try {
+    await orm.connect();
+    Logger.log('Database connection established', 'Bootstrap');
+  } catch (error) {
+    Logger.error(
+      `Could not establish database connection at startup — /health/ready will report down until it succeeds: ${
+        error instanceof Error ? error.message : 'unknown error'
+      }`,
+      undefined,
+      'Bootstrap',
+    );
+  }
 
   const port = process.env.PORT ? Number(process.env.PORT) : 3000;
   await app.listen(port);

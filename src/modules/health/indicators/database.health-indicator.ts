@@ -1,37 +1,29 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { HealthCheckError, HealthIndicator, HealthIndicatorResult } from '@nestjs/terminus';
-import { Pool } from 'pg';
+import { MikroORM } from '@mikro-orm/postgresql';
 
 /**
- * Checagem de conectividade simples via pool `pg` cru — ainda sem ORM.
- * Vai ser substituído por um indicator baseado em MikroORM assim que a
- * camada de persistência (entidades/migrations) for implementada,
- * reaproveitando a conexão da própria aplicação em vez de abrir um
- * segundo pool só pra health check.
+ * Checagem de conectividade via `checkConnection()` do MikroORM —
+ * reaproveita a mesma conexão/pool da aplicação, registrada pelo
+ * `MikroOrmModule` (ver `app.module.ts`), em vez de abrir um pool `pg`
+ * cru só pra health check (era assim antes da persistência existir).
  */
 @Injectable()
-export class DatabaseHealthIndicator extends HealthIndicator implements OnModuleDestroy {
-  private readonly pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 1,
-    connectionTimeoutMillis: 3000,
-  });
-
-  async isHealthy(key: string): Promise<HealthIndicatorResult> {
-    try {
-      await this.pool.query('SELECT 1');
-      return this.getStatus(key, true);
-    } catch (error) {
-      throw new HealthCheckError(
-        'Database check failed',
-        this.getStatus(key, false, {
-          message: error instanceof Error ? error.message : 'unknown error',
-        }),
-      );
-    }
+export class DatabaseHealthIndicator extends HealthIndicator {
+  constructor(private readonly orm: MikroORM) {
+    super();
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.pool.end();
+  async isHealthy(key: string): Promise<HealthIndicatorResult> {
+    const result = await this.orm.checkConnection();
+
+    if (result.ok) {
+      return this.getStatus(key, true);
+    }
+
+    throw new HealthCheckError(
+      'Database check failed',
+      this.getStatus(key, false, { message: result.reason }),
+    );
   }
 }

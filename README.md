@@ -11,7 +11,7 @@ Processador de transações financeiras distribuído para uma plataforma de iGam
 - Framework: NestJS
 - Banco: PostgreSQL
 - Mensageria: AWS SQS via LocalStack
-- ORM: MikroORM (a definir se preferido ou TypeORM)
+- ORM: MikroORM 7 (`defineEntity`/`p`, não decorators — ver nota abaixo)
 - Orquestração: Docker Compose
 
 ## Pré-requisitos
@@ -25,10 +25,18 @@ Processador de transações financeiras distribuído para uma plataforma de iGam
 cp .env.example .env
 bun install
 docker compose up -d postgres localstack
+bun run migration:up
 bun run start:dev
 ```
 
 A API sobe em `http://localhost:3000`.
+
+> **Nota sobre o MikroORM 7**: a versão instalada não usa mais decorators
+> (`@Entity`, `@Property`) como API recomendada — usa `defineEntity()` com
+> o builder `p` (`src/**/infrastructure/*.orm-entity.ts`). Constraints
+> reais (UNIQUE composto, CHECK, FKs, o trigger de imutabilidade do
+> ledger) ficam escritas à mão em SQL puro na migration, não declaradas
+> nas entidades — ver comentário no topo de `migrations/Migration*.ts`.
 
 ## Scripts
 
@@ -40,6 +48,8 @@ A API sobe em `http://localhost:3000`.
 | `bun run lint` / `lint:fix` | ESLint |
 | `bun run format` | Prettier |
 | `bun test` | Testes (Bun test runner) |
+| `bun run migration:create` | Gera uma nova migration a partir do diff das entidades |
+| `bun run migration:up` / `migration:down` | Aplica / reverte migrations |
 
 ## Health checks
 
@@ -50,7 +60,7 @@ A API sobe em `http://localhost:3000`.
 
 - [x] Scaffolding (NestJS + Bun + Docker Compose + health checks)
 - [x] Domínio (Money, Wallet, WagerTransaction, WalletLedgerEntry)
-- [ ] Persistência (MikroORM + migrations com constraints no schema)
+- [x] Persistência (MikroORM + migrations com constraints no schema)
 - [ ] Caso de uso central + concorrência por `walletId`
 - [ ] Inbox/Outbox + SQS
 - [ ] API (controllers, DTOs, autenticação)

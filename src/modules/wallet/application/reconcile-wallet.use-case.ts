@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { Money, type MoneyProps } from '../../../shared/domain/money';
+import { MetricsService } from '../../../shared/infrastructure/metrics.service';
 import { WalletNotFoundError } from '../domain/wallet.errors';
 import { WalletLedgerEntryRepository } from './ports/wallet-ledger-entry.repository';
 import { WalletRepository } from './ports/wallet.repository';
@@ -24,10 +25,13 @@ export interface ReconcileWalletResult {
  */
 @Injectable()
 export class ReconcileWalletUseCase {
+  private readonly logger = new Logger(ReconcileWalletUseCase.name);
+
   constructor(
     private readonly em: EntityManager,
     private readonly walletRepository: WalletRepository,
     private readonly walletLedgerEntryRepository: WalletLedgerEntryRepository,
+    private readonly metrics: MetricsService,
   ) {}
 
   async execute(walletId: string): Promise<ReconcileWalletResult> {
@@ -48,13 +52,28 @@ export class ReconcileWalletUseCase {
 
       const stored = wallet.currentBalance;
       const difference = stored.subtract(calculated);
+      const consistent = stored.equals(calculated);
+
+      // Seção 9: divergência nunca é corrigida silenciosamente — loga,
+      // conta em métrica e (já antes desta correção) sinaliza na resposta.
+      if (!consistent) {
+        this.metrics.walletReconciliationDivergencesTotal.inc();
+        this.logger.error({
+          event: 'wallet_reconciliation_divergence',
+          walletId: wallet.id,
+          storedBalance: stored.toProps(),
+          calculatedBalance: calculated.toProps(),
+          difference: difference.toProps(),
+          checkedEntries: entries.length,
+        });
+      }
 
       return {
         walletId: wallet.id,
         storedBalance: stored.toProps(),
         calculatedBalance: calculated.toProps(),
         difference: difference.toProps(),
-        consistent: stored.equals(calculated),
+        consistent,
         checkedEntries: entries.length,
       };
     });

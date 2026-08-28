@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { Money } from '../../../shared/domain/money';
+import { MetricsService } from '../../../shared/infrastructure/metrics.service';
 import { Wallet } from '../domain/wallet';
 import { LedgerDirection, WalletLedgerEntry } from '../domain/wallet-ledger-entry';
 import { WalletNotFoundError } from '../domain/wallet.errors';
@@ -70,12 +71,14 @@ class FakeWalletLedgerEntryRepository implements WalletLedgerEntryRepository {
 function setup() {
   const walletRepository = new FakeWalletRepository();
   const walletLedgerEntryRepository = new FakeWalletLedgerEntryRepository();
+  const metrics = new MetricsService();
   const useCase = new ReconcileWalletUseCase(
     new FakeEntityManager() as unknown as EntityManager,
     walletRepository,
     walletLedgerEntryRepository,
+    metrics,
   );
-  return { useCase, walletRepository, walletLedgerEntryRepository };
+  return { useCase, walletRepository, walletLedgerEntryRepository, metrics };
 }
 
 describe('ReconcileWalletUseCase', () => {
@@ -117,7 +120,7 @@ describe('ReconcileWalletUseCase', () => {
   });
 
   it('reporta inconsistente e a diferença exata quando o saldo divergiu do ledger', async () => {
-    const { useCase, walletRepository, walletLedgerEntryRepository } = setup();
+    const { useCase, walletRepository, walletLedgerEntryRepository, metrics } = setup();
     // Simula um saldo que ficou fora de sincronia com o ledger (não deveria
     // acontecer em operação normal — é exatamente o que a reconciliação existe pra pegar).
     const wallet = Wallet.create({ id: 'w1', playerId: 'p1', currency: 'BRL' });
@@ -141,6 +144,10 @@ describe('ReconcileWalletUseCase', () => {
     expect(result.storedBalance).toEqual({ amount: '999.00', currency: 'BRL' });
     expect(result.calculatedBalance).toEqual({ amount: '100.00', currency: 'BRL' });
     expect(result.difference).toEqual({ amount: '899.00', currency: 'BRL' });
+
+    // Seção 9: divergência não pode passar batido — precisa virar métrica.
+    const divergences = await metrics.walletReconciliationDivergencesTotal.get();
+    expect(divergences.values[0]?.value).toBe(1);
   });
 
   it('sem lançamento nenhum: calculatedBalance zero, consistente só se stored também for zero', async () => {

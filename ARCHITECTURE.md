@@ -57,7 +57,7 @@ A checagem de idempotência é feita **depois** do lock deliberadamente: checar 
 ## Observabilidade (seção 12)
 
 - **Logs**: `JsonLogger` substitui o `ConsoleLogger` padrão do Nest — uma linha JSON por evento. Eventos de domínio carregam só identificadores (`transactionId`/`walletId`/`providerId`/`correlationId`) — nunca valor monetário nem payload bruto de mensagem SQS.
-- **Métricas**: `MetricsService` (`prom-client`, `Registry` próprio por instância) expostas em `GET /metrics` — transações por status/kind, duplicatas (idempotência **e** redelivery de mensagem — dois eixos diferentes, mesmo contador), retries de `PENDING_REFERENCE`, profundidade da DLQ, tempo de lock, atraso do outbox, latência fim-a-fim.
+- **Métricas**: `MetricsService` (`prom-client`, `Registry` próprio por instância) expostas em `GET /metrics` — transações por status/kind, duplicatas (idempotência **e** redelivery de mensagem — dois eixos diferentes, mesmo contador), retries de `PENDING_REFERENCE`, profundidade da DLQ, tempo de lock, atraso do outbox, latência fim-a-fim, e divergências de reconciliação (`wallet_reconciliation_divergences_total`).
 - **Health checks**: liveness nunca checa dependência externa (um Postgres instável não pode derrubar o processo via orquestrador); readiness checa Postgres **e** SQS.
 
 ## Autenticação (seção 2 — não vale pontos)

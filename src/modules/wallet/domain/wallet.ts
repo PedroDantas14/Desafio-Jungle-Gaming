@@ -42,7 +42,9 @@ export class Wallet {
   }
 
   static create(params: CreateWalletParams): Wallet {
-    return new Wallet(params.id, params.playerId, Money.zero(params.currency), 0);
+    // Seção 6.2: "version inicia em 1 após a criação e incrementa somente
+    // quando o saldo muda" — mesmo sem nenhuma mudança de saldo ainda.
+    return new Wallet(params.id, params.playerId, Money.zero(params.currency), 1);
   }
 
   /** Reidrata a partir do banco — não revalida regra nenhuma, só reconstrói estado já persistido. */

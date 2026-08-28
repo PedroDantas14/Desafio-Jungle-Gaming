@@ -139,7 +139,7 @@ GET    /metrics
 ## Observabilidade
 
 - **Logs estruturados (JSON)** — `JsonLogger` (`src/shared/infrastructure/json-logger.ts`) substitui o logger padrão do Nest via `app.useLogger()`: uma linha JSON por evento, nunca texto livre. Eventos de domínio (`wager_transaction_finalized`, `pending_reference_resolved`, `outbox_message_published`, ...) carregam `transactionId`/`walletId`/`providerId`/`correlationId` — nunca o valor monetário nem o payload bruto de uma mensagem SQS.
-- **Métricas Prometheus** — `GET /metrics` (`MetricsService`, `src/shared/infrastructure/metrics.service.ts`): transações por status/kind, duplicatas identificadas (idempotência e redelivery de mensagem), tentativas de reprocessamento de `PENDING_REFERENCE`, mensagens na DLQ (amostradas periodicamente pelo `DlqDepthSampler`), tempo de espera no lock da wallet, atraso do outbox e latência de processamento fim-a-fim.
+- **Métricas Prometheus** — `GET /metrics` (`MetricsService`, `src/shared/infrastructure/metrics.service.ts`): transações por status/kind, duplicatas identificadas (idempotência e redelivery de mensagem), tentativas de reprocessamento de `PENDING_REFERENCE`, mensagens na DLQ (amostradas periodicamente pelo `DlqDepthSampler`), tempo de espera no lock da wallet, atraso do outbox, latência de processamento fim-a-fim e divergências de reconciliação (seção 9: nunca corrigidas silenciosamente — logadas, contadas e sinalizadas na resposta).
 
 ## Autenticação
 

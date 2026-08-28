@@ -72,6 +72,13 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  /** Seção 9: "divergências não são corrigidas silenciosamente — devem ser logadas, contabilizadas em métrica e sinalizadas na resposta." */
+  readonly walletReconciliationDivergencesTotal = new Counter({
+    name: 'wallet_reconciliation_divergences_total',
+    help: 'Reconciliations where the stored balance diverged from the balance recalculated from the ledger.',
+    registers: [this.registry],
+  });
+
   constructor() {
     collectDefaultMetrics({ register: this.registry });
   }

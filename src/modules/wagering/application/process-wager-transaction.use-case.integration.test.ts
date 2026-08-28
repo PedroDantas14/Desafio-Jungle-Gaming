@@ -191,8 +191,8 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
 
       const finalWallet = await loadWallet(walletId);
       expect(finalWallet?.currentBalance.toString()).toBe('20.00');
-      // currentVersion: 1 (opening) + 1 (o único débito que processou) = 2
-      expect(finalWallet?.currentVersion).toBe(2);
+      // currentVersion: 1 (criação) + 1 (opening) + 1 (o único débito que processou) = 3
+      expect(finalWallet?.currentVersion).toBe(3);
 
       const debits = await countDebits(walletId);
       expect(debits).toBe(1);
@@ -386,6 +386,7 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
       orm.em,
       walletRepository,
       new WalletLedgerEntryRepositoryMikroOrm(),
+      new MetricsService(),
     );
 
     const walletId = await openFundedWallet('100.00');

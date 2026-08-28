@@ -5,17 +5,17 @@ import { Wallet } from './wallet';
 import { InsufficientBalanceError } from './wallet.errors';
 
 describe('Wallet', () => {
-  it('cria com saldo zero e version 0', () => {
+  it('cria com saldo zero e version 1 (seção 6.2: version inicia em 1 na criação)', () => {
     const wallet = Wallet.create({ id: 'w1', playerId: 'p1', currency: 'BRL' });
     expect(wallet.currentBalance.toString()).toBe('0.00');
-    expect(wallet.currentVersion).toBe(0);
+    expect(wallet.currentVersion).toBe(1);
   });
 
   it('credita o saldo e avança a version', () => {
     const wallet = Wallet.create({ id: 'w1', playerId: 'p1', currency: 'BRL' });
     wallet.credit(Money.fromString('100.00', 'BRL'));
     expect(wallet.currentBalance.toString()).toBe('100.00');
-    expect(wallet.currentVersion).toBe(1);
+    expect(wallet.currentVersion).toBe(2);
   });
 
   it('debita o saldo quando há fundos suficientes', () => {
@@ -23,7 +23,7 @@ describe('Wallet', () => {
     wallet.credit(Money.fromString('100.00', 'BRL'));
     wallet.debit(Money.fromString('80.00', 'BRL'));
     expect(wallet.currentBalance.toString()).toBe('20.00');
-    expect(wallet.currentVersion).toBe(2);
+    expect(wallet.currentVersion).toBe(3);
   });
 
   it('rejeita um débito que deixaria o saldo negativo, sem mutar estado', () => {
@@ -33,7 +33,7 @@ describe('Wallet', () => {
     expect(() => wallet.debit(Money.fromString('100.01', 'BRL'))).toThrow(InsufficientBalanceError);
     // Uma tentativa rejeitada não pode alterar balance nem version.
     expect(wallet.currentBalance.toString()).toBe('100.00');
-    expect(wallet.currentVersion).toBe(1);
+    expect(wallet.currentVersion).toBe(2);
   });
 
   it('permite um débito que zera exatamente o saldo', () => {
@@ -57,7 +57,7 @@ describe('Wallet', () => {
 
     expect(() => wallet.debit(bet)).toThrow(InsufficientBalanceError);
     expect(wallet.currentBalance.toString()).toBe('20.00');
-    expect(wallet.currentVersion).toBe(2);
+    expect(wallet.currentVersion).toBe(3);
   });
 
   it('rejeita operações entre moedas diferentes', () => {

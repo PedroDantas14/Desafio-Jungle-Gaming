@@ -28,7 +28,7 @@ describe('WalletMapper', () => {
     WalletMapper.applyToExistingOrmEntity(wallet, row, updatedAt);
 
     expect(row.balance.minorUnits).toBe(5000n);
-    expect(row.version).toBe(1);
+    expect(row.version).toBe(2);
     expect(row.createdAt).toBe(createdAt);
     expect(row.updatedAt).toBe(updatedAt);
   });

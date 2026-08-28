@@ -66,7 +66,7 @@ describe('CreateWalletUseCase', () => {
 
     expect(result.playerId).toBe('p1');
     expect(result.balance).toEqual({ amount: '0.00', currency: 'BRL' });
-    expect(result.version).toBe(0);
+    expect(result.version).toBe(1);
   });
 
   it('rejeita criar uma segunda wallet pro mesmo player+moeda', async () => {

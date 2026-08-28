@@ -64,12 +64,18 @@ GET    /wagering/transactions/:transactionId
 GET    /providers/:providerId/wagering/transactions/:externalTransactionId
 GET    /health/live
 GET    /health/ready
+GET    /metrics
 ```
 
 ## Health checks
 
 - `GET /health/live` — o processo está de pé (sem checar dependências externas)
-- `GET /health/ready` — a instância consegue de fato servir tráfego (checa conexão com o Postgres)
+- `GET /health/ready` — a instância consegue de fato servir tráfego (checa conexão com o Postgres **e** com o SQS/LocalStack)
+
+## Observabilidade
+
+- **Logs estruturados (JSON)** — `JsonLogger` (`src/shared/infrastructure/json-logger.ts`) substitui o logger padrão do Nest via `app.useLogger()`: uma linha JSON por evento, nunca texto livre. Eventos de domínio (`wager_transaction_finalized`, `pending_reference_resolved`, `outbox_message_published`, ...) carregam `transactionId`/`walletId`/`providerId`/`correlationId` — nunca o valor monetário nem o payload bruto de uma mensagem SQS.
+- **Métricas Prometheus** — `GET /metrics` (`MetricsService`, `src/shared/infrastructure/metrics.service.ts`): transações por status/kind, duplicatas identificadas (idempotência e redelivery de mensagem), tentativas de reprocessamento de `PENDING_REFERENCE`, mensagens na DLQ (amostradas periodicamente pelo `DlqDepthSampler`), tempo de espera no lock da wallet, atraso do outbox e latência de processamento fim-a-fim.
 
 ## Autenticação
 
@@ -91,6 +97,6 @@ passar). Configurar `AUTH_JWKS_URI` + `AUTH_ISSUER` contra um IdP real
 - [x] Inbox/Outbox + SQS (produtor: outbox → `integration-events.fifo`; consumidor: `wager-transactions.fifo` → use case)
 - [x] API (controllers, DTOs, autenticação — ver nota abaixo)
 - [x] REFUND / ROLLBACK / `PENDING_REFERENCE` + worker de reprocessamento
-- [ ] Observabilidade
-- [ ] Testes de integração/concorrência
+- [x] Observabilidade (logs estruturados JSON, métricas Prometheus, readiness com SQS)
+- [ ] Testes de integração/concorrência ampliados (50 apostas paralelas, múltiplas instâncias, recuperação de crash)
 - [ ] `ARCHITECTURE.md`

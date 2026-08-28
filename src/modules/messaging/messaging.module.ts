@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { InboxMessageRepository } from './application/ports/inbox-message.repository';
 import { OutboxMessageRepository } from './application/ports/outbox-message.repository';
+import { DlqDepthSampler } from './infrastructure/dlq-depth-sampler';
 import { InboxMessageRepositoryMikroOrm } from './infrastructure/inbox-message.repository.mikro-orm';
 import { OutboxMessageRepositoryMikroOrm } from './infrastructure/outbox-message.repository.mikro-orm';
 import { OutboxPublisherWorker } from './infrastructure/outbox-publisher.worker';
@@ -23,6 +24,7 @@ import { SqsQueueRegistry } from './infrastructure/sqs-queue-registry';
     { provide: InboxMessageRepository, useClass: InboxMessageRepositoryMikroOrm },
     { provide: OutboxMessageRepository, useClass: OutboxMessageRepositoryMikroOrm },
     OutboxPublisherWorker,
+    DlqDepthSampler,
   ],
   exports: [
     SQSClient,

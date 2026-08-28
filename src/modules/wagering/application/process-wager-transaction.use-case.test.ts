@@ -15,6 +15,7 @@ import {
   WagerTransactionStatus,
 } from '../domain/wager-transaction';
 import { type WagerTransactionRepository } from './ports/wager-transaction.repository';
+import { IdempotencyPayloadConflictError } from '../domain/wagering.errors';
 import {
   type ProcessWagerTransactionCommand,
   ProcessWagerTransactionUseCase,
@@ -722,6 +723,25 @@ describe('ProcessWagerTransactionUseCase', () => {
     expect(replay.status).toBe(WagerTransactionStatus.Rejected);
     expect(replay.failureCode).toBe(first.failureCode);
     expect(replay.balance).toEqual({ amount: '50.00', currency: 'BRL' });
+  });
+
+  it('mesma idempotencyKey com payload diferente é CONFLITO, não replay (seção 6.3)', async () => {
+    const { useCase, walletRepository, walletLedgerEntryRepository } = setup();
+    const wallet = Wallet.create({ id: 'w1', playerId: 'p1', currency: 'BRL' });
+    wallet.credit(Money.fromString('100.00', 'BRL'));
+    walletRepository.seed(wallet);
+
+    await useCase.execute(betCommand({ payloadHash: 'hash-1' }));
+
+    // Mesma idempotencyKey (default do betCommand), mas o payloadHash
+    // mudou — provider mandando um corpo diferente sob a mesma chave.
+    await expect(
+      useCase.execute(betCommand({ payloadHash: 'hash-2' })),
+    ).rejects.toThrow(IdempotencyPayloadConflictError);
+
+    // Nada reprocessado — o conflito é detectado ANTES de qualquer efeito.
+    expect(walletLedgerEntryRepository.entries).toHaveLength(1);
+    expect(wallet.currentBalance.toString()).toBe('20.00');
   });
 
   it('duas apostas de 80 sobre 100, aplicadas em sequência: só a primeira processa', async () => {

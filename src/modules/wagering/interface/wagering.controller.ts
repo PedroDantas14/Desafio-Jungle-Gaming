@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { BearerAuthGuard } from '../../../shared/interface/bearer-auth.guard';
+import { canonicalPayloadHash } from '../../../shared/infrastructure/payload-hash';
 import { WagerTransactionRepository } from '../application/ports/wager-transaction.repository';
 import { ProcessWagerTransactionUseCase } from '../application/process-wager-transaction.use-case';
 import { ProcessWagerTransactionRequestDto } from './dto/process-wager-transaction-request.dto';
@@ -72,11 +73,26 @@ export class WageringController {
       );
     }
 
+    // Seção 9: hash de um subconjunto explícito dos campos de negócio —
+    // nunca do DTO inteiro cru (que não tem ordem de chave garantida nem
+    // exclui metadado incidental).
+    const payloadHash = canonicalPayloadHash({
+      providerId: dto.providerId,
+      externalTransactionId: dto.externalTransactionId,
+      walletId: dto.walletId,
+      playerId: dto.playerId,
+      roundId: dto.roundId,
+      gameId: dto.gameId,
+      kind: dto.kind,
+      money: { amount: dto.money.amount, currency: dto.money.currency },
+      referenceExternalTransactionId: dto.referenceExternalTransactionId,
+    });
+
     return this.processWagerTransactionUseCase.execute({
       providerId: dto.providerId,
       externalTransactionId: dto.externalTransactionId,
       idempotencyKey,
-      payloadHash: JSON.stringify(dto),
+      payloadHash,
       walletId: dto.walletId,
       playerId: dto.playerId,
       roundId: dto.roundId,

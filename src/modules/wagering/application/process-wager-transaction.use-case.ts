@@ -21,7 +21,7 @@ import {
   WagerTransactionKind,
   WagerTransactionStatus,
 } from '../domain/wager-transaction';
-import { UnsupportedWagerKindError } from '../domain/wagering.errors';
+import { IdempotencyPayloadConflictError, UnsupportedWagerKindError } from '../domain/wagering.errors';
 import { WagerTransactionPendingReferenceEvent } from '../domain/events/wager-transaction-pending-reference.event';
 import { WagerTransactionProcessedEvent } from '../domain/events/wager-transaction-processed.event';
 import { WagerTransactionRejectedEvent } from '../domain/events/wager-transaction-rejected.event';
@@ -159,6 +159,12 @@ export class ProcessWagerTransactionUseCase {
         em,
       );
       if (existing) {
+        // Seção 6.3: mesma idempotencyKey, payload diferente = CONFLITO,
+        // não replay — devolver o resultado antigo aqui esconderia do
+        // provider que esta requisição, especificamente, nunca rodou.
+        if (!existing.matchesPayload(command.payloadHash)) {
+          throw new IdempotencyPayloadConflictError(command.idempotencyKey);
+        }
         return await this.toReplayResult(existing, em);
       }
 

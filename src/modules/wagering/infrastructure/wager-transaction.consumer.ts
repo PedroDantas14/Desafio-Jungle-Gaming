@@ -1,5 +1,4 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import { EntityManager } from '@mikro-orm/postgresql';
 import {
   DeleteMessageCommand,
@@ -9,6 +8,7 @@ import {
 } from '@aws-sdk/client-sqs';
 import { DomainError } from '../../../shared/domain/domain-error';
 import { MetricsService } from '../../../shared/infrastructure/metrics.service';
+import { canonicalPayloadHash } from '../../../shared/infrastructure/payload-hash';
 import { InboxMessageRepository } from '../../messaging/application/ports/inbox-message.repository';
 import { InboxMessage } from '../../messaging/domain/inbox-message';
 import { InvalidWagerMessageError } from '../../messaging/domain/messaging.errors';
@@ -32,6 +32,8 @@ interface WagerTransactionRequestedPayload {
     gameId: string;
     kind: string;
     money: { amount: string; currency: string };
+    /** REFUND/ROLLBACK (Parte 7) — ausente pros demais kinds. */
+    referenceExternalTransactionId?: string;
   };
 }
 
@@ -90,14 +92,22 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Um ciclo de long-poll + processamento — chamável isoladamente em testes. */
-  async pollOnce(): Promise<number> {
+  /**
+   * Um ciclo de long-poll + processamento — chamável isoladamente em
+   * testes. `visibilityTimeoutSeconds` só existe pra teste de integração
+   * conseguir provar redelivery real (visibility timeout expirando) sem
+   * esperar 30s de verdade — mesmo espírito do `batchSize` do
+   * `PendingReferenceReprocessorWorker.reprocessBatch()`; parâmetro de
+   * método, não de construtor, pra não interferir na resolução de DI do
+   * Nest (um `number` sem token não resolveria em produção).
+   */
+  async pollOnce(visibilityTimeoutSeconds = 30): Promise<number> {
     const { Messages } = await this.sqsClient.send(
       new ReceiveMessageCommand({
         QueueUrl: this.queues.urlFor('wagerTransactionsInput'),
         MaxNumberOfMessages: 5,
         WaitTimeSeconds: 5,
-        VisibilityTimeout: 30,
+        VisibilityTimeout: visibilityTimeoutSeconds,
       }),
     );
 
@@ -147,7 +157,24 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
   }
 
   private async processMessage(messageId: string, body: string): Promise<void> {
-    const payloadHash = createHash('sha256').update(body).digest('hex');
+    // Parseia primeiro — o hash é sobre o SUBCONJUNTO de campos de
+    // negócio (seção 9), nunca sobre o envelope inteiro da mensagem
+    // (que carrega `messageId`/`occurredAt`, metadado de transporte).
+    // Mesmo algoritmo usado pelo `WageringController` — a mesma operação
+    // de negócio produz o mesmo `payloadHash` não importa a porta de
+    // entrada.
+    const parsed = this.parseMessage(body);
+    const payloadHash = canonicalPayloadHash({
+      providerId: parsed.data.providerId,
+      externalTransactionId: parsed.data.externalTransactionId,
+      walletId: parsed.data.walletId,
+      playerId: parsed.data.playerId,
+      roundId: parsed.data.roundId,
+      gameId: parsed.data.gameId,
+      kind: parsed.data.kind,
+      money: parsed.data.money,
+      referenceExternalTransactionId: parsed.data.referenceExternalTransactionId,
+    });
 
     await this.em.transactional(async (em) => {
       const existingInbox = await this.inboxMessageRepository.findByConsumerAndMessageId(
@@ -155,6 +182,18 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
         messageId,
         em,
       );
+      const isRedelivery = existingInbox !== null;
+      if (isRedelivery) {
+        // Redelivery de uma messageId já vista — concluída (crash entre o
+        // commit e o ack, o caso mais comum) ou não (crash no meio do
+        // processamento anterior). Dedup no nível de mensagem, eixo
+        // diferente do dedup por idempotencyKey dentro do use case, mas a
+        // mesma métrica de "duplicata identificada" da seção 12 se
+        // aplica — incrementada ANTES do early-return abaixo, senão a
+        // sub-casuística mais comum (mensagem já concluída) nunca conta.
+        this.metrics.wagerTransactionDuplicatesTotal.inc();
+      }
+
       if (existingInbox?.isProcessed) {
         // Redelivery de uma mensagem já concluída — não reprocessa
         // efeito nenhum, só confirma (ack acontece em handleMessage).
@@ -163,21 +202,10 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
 
       // Reusa a linha de inbox se essa messageId já foi recebida mas não
       // concluída (crash no meio da vez anterior) — nunca cria duplicata.
-      const isRedelivery = existingInbox !== null;
       const inbox =
         existingInbox ??
         InboxMessage.receive({ messageId, consumerName: CONSUMER_NAME, payloadHash });
       await this.inboxMessageRepository.save(inbox, em);
-
-      if (isRedelivery) {
-        // Redelivery de uma messageId já vista (concluída ou não) — dedup
-        // no nível de mensagem, eixo diferente do dedup por idempotencyKey
-        // dentro do use case, mas a mesma métrica de "duplicata
-        // identificada" da seção 12 se aplica.
-        this.metrics.wagerTransactionDuplicatesTotal.inc();
-      }
-
-      const parsed = this.parseMessage(body);
 
       await this.processWagerTransactionUseCase.processWithinTransaction(
         {
@@ -192,6 +220,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
           kind: parsed.data.kind as WagerTransactionKind,
           amount: parsed.data.money.amount,
           currency: parsed.data.money.currency,
+          referenceExternalTransactionId: parsed.data.referenceExternalTransactionId,
           causationId: messageId,
         },
         em,

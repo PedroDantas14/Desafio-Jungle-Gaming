@@ -123,6 +123,12 @@ describe('WagerTransaction', () => {
     expect(tx.failureCode).toBe('REFERENCE_NOT_FOUND');
   });
 
+  it('matchesPayload() compara contra o payloadHash com que a transação foi criada', () => {
+    const tx = createBet({ payloadHash: 'hash-original' });
+    expect(tx.matchesPayload('hash-original')).toBe(true);
+    expect(tx.matchesPayload('hash-diferente')).toBe(false);
+  });
+
   it('rejeita transicionar pra fora de um status terminal', () => {
     const tx = createBet();
     tx.markProcessed();

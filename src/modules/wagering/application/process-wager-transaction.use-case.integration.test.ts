@@ -5,6 +5,7 @@ import { MetricsService } from '../../../shared/infrastructure/metrics.service';
 import { Uuidv7IdGenerator } from '../../../shared/infrastructure/uuidv7-id-generator';
 import { OutboxMessageRepositoryMikroOrm } from '../../messaging/infrastructure/outbox-message.repository.mikro-orm';
 import { CreateWalletUseCase } from '../../wallet/application/create-wallet.use-case';
+import { ReconcileWalletUseCase } from '../../wallet/application/reconcile-wallet.use-case';
 import { WalletLedgerEntryRepositoryMikroOrm } from '../../wallet/infrastructure/wallet-ledger-entry.repository.mikro-orm';
 import { WalletLedgerEntryOrmEntity } from '../../wallet/infrastructure/wallet-ledger-entry.orm-entity';
 import { WalletRepositoryMikroOrm } from '../../wallet/infrastructure/wallet.repository.mikro-orm';
@@ -238,7 +239,108 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
     expect(finalWallet?.currentBalance.toString()).toBe('40.00');
   });
 
-  it('mesma idempotencyKey disparada concorrentemente: só um efeito é aplicado', async () => {
+  it(
+    'cenário obrigatório (seção 13, concorrência #1): a MESMA aposta ' +
+      '(mesma idempotencyKey) enviada 50 vezes em paralelo → um único débito',
+    async () => {
+      const walletId = await openFundedWallet('100.00');
+      const command = bet(walletId, 'tx-duplicate-50x');
+
+      const results = await Promise.all(
+        Array.from({ length: 50 }, () => processWagerTransactionUseCase.execute(command)),
+      );
+
+      // Todas as 50 chamadas concordam no resultado final (mesmo id de
+      // transação, mesmo status) — só uma pode ter aplicado o efeito de
+      // verdade (as outras 49 são replay, sinalizado ou não conforme
+      // quem ganhou a corrida pelo insert original).
+      const transactionIds = new Set(results.map((r) => r.transactionId));
+      const statuses = new Set(results.map((r) => r.status));
+      expect(transactionIds.size).toBe(1);
+      expect(statuses.size).toBe(1);
+
+      const finalWallet = await loadWallet(walletId);
+      expect(finalWallet?.currentBalance.toString()).toBe('20.00');
+
+      const debits = await countDebits(walletId);
+      expect(debits).toBe(1);
+    },
+  );
+
+  it(
+    'seção 13, concorrência #3: wallets DISTINTAS processadas em paralelo — ' +
+      'sem interferência entre locks de wallets diferentes',
+    async () => {
+      const walletIds = await Promise.all(
+        Array.from({ length: 10 }, () => openFundedWallet('100.00')),
+      );
+
+      const results = await Promise.all(
+        walletIds.map((walletId, i) =>
+          processWagerTransactionUseCase.execute(bet(walletId, `tx-distinct-wallet-${i}`)),
+        ),
+      );
+
+      // Nenhuma disputa saldo com a outra — todas processam, cada wallet
+      // debitada exatamente uma vez, sem nenhuma rejeitada por saldo.
+      expect(results.every((r) => r.status === WagerTransactionStatus.Processed)).toBe(true);
+
+      for (const walletId of walletIds) {
+        expect((await loadWallet(walletId))?.currentBalance.toString()).toBe('20.00');
+        expect(await countDebits(walletId)).toBe(1);
+      }
+    },
+  );
+
+  it(
+    'seção 13, concorrência #4: ≥ 3 instâncias simultâneas do use case — ' +
+      'mesmo cenário obrigatório (2 apostas de 80 sobre 100), cada chamada ' +
+      'passando por uma instância DIFERENTE do use case',
+    async () => {
+      // 3 composições independentes (cada uma com seus próprios repos/
+      // idGenerator/métricas, como 3 processos de app distintos teriam) —
+      // só compartilham o `orm.em` porque é o Postgres real por trás que
+      // importa aqui, não o objeto JS: `em.transactional()` faz fork
+      // interno por chamada (ver nota do describe()), então o lock da
+      // wallet funciona igual não importa qual "instância" disparou.
+      function newInstance(): ProcessWagerTransactionUseCase {
+        return new ProcessWagerTransactionUseCase(
+          orm.em,
+          new WalletRepositoryMikroOrm(),
+          new WalletLedgerEntryRepositoryMikroOrm(),
+          new WagerTransactionRepositoryMikroOrm(),
+          new OutboxMessageRepositoryMikroOrm(),
+          new Uuidv7IdGenerator(),
+          new MetricsService(),
+        );
+      }
+      const instances = [newInstance(), newInstance(), newInstance()];
+
+      const walletId = await openFundedWallet('100.00');
+
+      const results = await Promise.all(
+        Array.from({ length: 9 }, (_, i) =>
+          instances[i % instances.length]!.execute(bet(walletId, `tx-multi-instance-${i}`)),
+        ),
+      );
+
+      // Saldo 100, apostas de 80 cada — só a primeira que travar o lock
+      // processa (20 sobra, não dá pra outra de 80), as outras 8 rejeitam
+      // por saldo insuficiente. Vale com 9 chamadas espalhadas em 3
+      // instâncias exatamente igual valeria com 1 instância só — é essa
+      // paridade que a seção 8/seção 13 exigem provar.
+      const processedCount = results.filter(
+        (r) => r.status === WagerTransactionStatus.Processed,
+      ).length;
+      expect(processedCount).toBe(1);
+
+      const finalWallet = await loadWallet(walletId);
+      expect(finalWallet?.currentBalance.toString()).toBe('20.00');
+      expect(await countDebits(walletId)).toBe(1);
+    },
+  );
+
+  it('mesma idempotencyKey disparada concorrentemente (2x): só um efeito é aplicado', async () => {
     const walletId = await openFundedWallet('100.00');
     const command = bet(walletId, 'tx-duplicate');
 
@@ -259,6 +361,44 @@ describe('ProcessWagerTransactionUseCase — integração (Postgres real)', () =
 
     const debits = await countDebits(walletId);
     expect(debits).toBe(1);
+  });
+
+  it('idempotencyKey igual, payload diferente: use case rejeita com CONFLITO, saldo intocado', async () => {
+    const walletId = await openFundedWallet('100.00');
+    const command = bet(walletId, 'tx-payload-conflict');
+
+    await processWagerTransactionUseCase.execute(command);
+
+    await expect(
+      processWagerTransactionUseCase.execute({ ...command, payloadHash: 'payload-diferente' }),
+    ).rejects.toThrow('was already used with a different payload');
+
+    // Nenhum segundo débito — o conflito foi barrado antes de aplicar efeito.
+    expect(await countDebits(walletId)).toBe(1);
+  });
+
+  it('invariante final (seção 13): wallet.balance == saldo reconstruído a partir do ledger', async () => {
+    // Reusa o ReconcileWalletUseCase (Parte 6) — é exatamente pra provar
+    // essa invariante que ele existe: recalcula do zero encadeando o
+    // ledger e compara com o balance armazenado, tudo em Money/bigint,
+    // nunca em float.
+    const reconcileWalletUseCase = new ReconcileWalletUseCase(
+      orm.em,
+      walletRepository,
+      new WalletLedgerEntryRepositoryMikroOrm(),
+    );
+
+    const walletId = await openFundedWallet('100.00');
+    const betCmd = bet(walletId, 'tx-invariant-bet');
+    await processWagerTransactionUseCase.execute(betCmd);
+    await processWagerTransactionUseCase.execute(
+      reversal(WagerTransactionKind.Refund, 'tx-invariant-refund', betCmd),
+    );
+    await processWagerTransactionUseCase.execute(bet(walletId, 'tx-invariant-bet-2'));
+
+    const reconciliation = await reconcileWalletUseCase.execute(walletId);
+    expect(reconciliation.consistent).toBe(true);
+    expect(reconciliation.storedBalance).toEqual(reconciliation.calculatedBalance);
   });
 
   describe('REFUND/ROLLBACK e PENDING_REFERENCE (Parte 7) — Postgres real', () => {

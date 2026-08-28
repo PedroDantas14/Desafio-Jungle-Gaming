@@ -98,5 +98,15 @@ passar). Configurar `AUTH_JWKS_URI` + `AUTH_ISSUER` contra um IdP real
 - [x] API (controllers, DTOs, autenticação — ver nota abaixo)
 - [x] REFUND / ROLLBACK / `PENDING_REFERENCE` + worker de reprocessamento
 - [x] Observabilidade (logs estruturados JSON, métricas Prometheus, readiness com SQS)
-- [ ] Testes de integração/concorrência ampliados (50 apostas paralelas, múltiplas instâncias, recuperação de crash)
+- [x] Testes de integração/concorrência ampliados (seção 13: 50 apostas paralelas, wallets distintas, ≥3 instâncias, crash pós-commit/pré-ack, publishers concorrentes, retry/DLQ, constraints reais)
 - [ ] `ARCHITECTURE.md`
+
+## Testes (seção 13)
+
+`bun test` roda a suíte unitária; `bun run test:integration` exige Postgres + LocalStack reais de pé (`docker compose up -d postgres localstack` + `migration:up`). Cobertura contra o checklist da seção 13:
+
+- **Unidade**: Money, invariantes de Wallet, regras BET/WIN/LOSS/REFUND/ROLLBACK, conflito de moeda, idempotency key com payload divergente.
+- **Integração**: migrations/constraints reais (`src/config/schema-constraints.integration.test.ts`), atomicidade wallet+ledger+inbox+outbox, inbox e redelivery, publishers concorrentes sobre a mesma outbox, retry e DLQ (redrive policy real via LocalStack).
+- **Concorrência**: mesma aposta 50x em paralelo, cenário obrigatório da seção 8, wallets distintas em paralelo, ≥3 instâncias simultâneas do use case, worker morto depois do commit e antes do ack, dois publishers na mesma outbox, REFUND/ROLLBACK chegando antes da referência (via use case e via SQS), invariante final `wallet.balance == saldo reconstruído pelo ledger` (reusa `ReconcileWalletUseCase`).
+
+**Correção real encontrada escrevendo esses testes**: `payloadHash` era calculado de dois jeitos diferentes e incompatíveis (HTTP: `JSON.stringify(dto)` cru; SQS: SHA-256 do envelope inteiro, incluindo metadado de transporte) — unificado em `canonicalPayloadHash` (`src/shared/infrastructure/payload-hash.ts`, JSON canônico de chaves ordenadas, só campos de negócio). Também corrigido: o contador de duplicatas da métrica `wager_transaction_duplicates_total` nunca incrementava no caso mais comum de redelivery (mensagem já concluída) por causa da ordem de um early-return no consumer.

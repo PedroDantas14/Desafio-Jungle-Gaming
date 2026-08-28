@@ -205,6 +205,16 @@ export class WagerTransaction {
   }
 
   /**
+   * Regra da seção 6.3: replay de idempotência só é válido se o payload
+   * bater — a mesma `idempotencyKey` com payload diferente é conflito,
+   * não replay (ver `IdempotencyPayloadConflictError`, checado pelo use
+   * case antes de reaproveitar o resultado desta transação).
+   */
+  matchesPayload(payloadHash: string): boolean {
+    return this.payloadHash === payloadHash;
+  }
+
+  /**
    * Chamado pelo use case (Parte 4) depois de resolver
    * (providerId, referenceExternalTransactionId) pro id interno da
    * transação referenciada — tipicamente ao sair de PendingReference.

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { IdGenerator } from '../../../shared/application/id-generator';
 import type {
@@ -6,6 +6,7 @@ import type {
   IntegrationEventContext,
 } from '../../../shared/domain/integration-event';
 import { Money } from '../../../shared/domain/money';
+import { MetricsService } from '../../../shared/infrastructure/metrics.service';
 import { OutboxMessageRepository } from '../../messaging/application/ports/outbox-message.repository';
 import { OutboxMessage } from '../../messaging/domain/outbox-message';
 import { WalletBalanceChangedEvent } from '../../wallet/domain/events/wallet-balance-changed.event';
@@ -103,6 +104,8 @@ export interface ProcessWagerTransactionResult {
  */
 @Injectable()
 export class ProcessWagerTransactionUseCase {
+  private readonly logger = new Logger(ProcessWagerTransactionUseCase.name);
+
   constructor(
     private readonly em: EntityManager,
     private readonly walletRepository: WalletRepository,
@@ -110,6 +113,7 @@ export class ProcessWagerTransactionUseCase {
     private readonly wagerTransactionRepository: WagerTransactionRepository,
     private readonly outboxMessageRepository: OutboxMessageRepository,
     private readonly idGenerator: IdGenerator,
+    private readonly metrics: MetricsService,
   ) {}
 
   async execute(command: ProcessWagerTransactionCommand): Promise<ProcessWagerTransactionResult> {
@@ -129,65 +133,85 @@ export class ProcessWagerTransactionUseCase {
     command: ProcessWagerTransactionCommand,
     em: EntityManager,
   ): Promise<ProcessWagerTransactionResult> {
-    if (!SUPPORTED_KINDS.has(command.kind)) {
-      throw new UnsupportedWagerKindError(command.kind);
+    const stopProcessingTimer = this.metrics.wagerTransactionProcessingSeconds.startTimer();
+    try {
+      if (!SUPPORTED_KINDS.has(command.kind)) {
+        throw new UnsupportedWagerKindError(command.kind);
+      }
+
+      // SELECT ... FOR UPDATE — trava a linha da wallet até o fim desta
+      // transação. Qualquer outra requisição concorrente pra MESMA
+      // wallet bloqueia aqui, entra depois que esta commitar, e enxerga
+      // o saldo já atualizado.
+      const wallet = await this.lockWallet(command.walletId, em);
+
+      // Regra 7 (seção 7): replay de uma idempotencyKey já processada
+      // retorna o resultado original, sem reprocessar nada. Checado
+      // DEPOIS do lock, de propósito: duas requisições com a MESMA
+      // idempotencyKey pra mesma wallet disparadas juntas passariam as
+      // duas por um "não existe" se checássemos antes de travar — a
+      // segunda só chegaria aqui depois que a primeira já commitou, e
+      // tentaria inserir a idempotencyKey de novo, batendo de frente no
+      // UNIQUE constraint como erro cru em vez de replay limpo. Sob o
+      // lock da wallet, isso é estruturalmente impossível.
+      const existing = await this.wagerTransactionRepository.findByIdempotencyKey(
+        command.idempotencyKey,
+        em,
+      );
+      if (existing) {
+        return await this.toReplayResult(existing, em);
+      }
+
+      const money = Money.fromString(command.amount, command.currency);
+
+      const transaction = WagerTransaction.create({
+        id: this.idGenerator.next(),
+        providerId: command.providerId,
+        externalTransactionId: command.externalTransactionId,
+        idempotencyKey: command.idempotencyKey,
+        payloadHash: command.payloadHash,
+        walletId: wallet.id,
+        playerId: command.playerId,
+        roundId: command.roundId,
+        gameId: command.gameId,
+        kind: command.kind,
+        money,
+        referenceExternalTransactionId: command.referenceExternalTransactionId,
+      });
+
+      const ledgerEntry = await this.applyEffect(transaction, wallet, money, em);
+
+      await this.persistOutcome(
+        transaction,
+        wallet,
+        ledgerEntry,
+        command.correlationId,
+        command.causationId,
+        em,
+      );
+
+      return this.toResult(transaction, wallet, false);
+    } finally {
+      stopProcessingTimer();
     }
+  }
 
-    // SELECT ... FOR UPDATE — trava a linha da wallet até o fim desta
-    // transação. Qualquer outra requisição concorrente pra MESMA
-    // wallet bloqueia aqui, entra depois que esta commitar, e enxerga
-    // o saldo já atualizado.
-    const wallet = await this.walletRepository.findByIdForUpdate(command.walletId, em);
-    if (!wallet) {
-      throw new WalletNotFoundError(command.walletId);
+  /**
+   * `SELECT ... FOR UPDATE` na linha da wallet, com o tempo de espera
+   * registrado em `walletLockWaitSeconds` (seção 12: "disputas de lock")
+   * — sinal direto de contenção numa hot wallet sob concorrência real.
+   */
+  private async lockWallet(walletId: string, em: EntityManager): Promise<Wallet> {
+    const stopLockTimer = this.metrics.walletLockWaitSeconds.startTimer();
+    try {
+      const wallet = await this.walletRepository.findByIdForUpdate(walletId, em);
+      if (!wallet) {
+        throw new WalletNotFoundError(walletId);
+      }
+      return wallet;
+    } finally {
+      stopLockTimer();
     }
-
-    // Regra 7 (seção 7): replay de uma idempotencyKey já processada
-    // retorna o resultado original, sem reprocessar nada. Checado
-    // DEPOIS do lock, de propósito: duas requisições com a MESMA
-    // idempotencyKey pra mesma wallet disparadas juntas passariam as
-    // duas por um "não existe" se checássemos antes de travar — a
-    // segunda só chegaria aqui depois que a primeira já commitou, e
-    // tentaria inserir a idempotencyKey de novo, batendo de frente no
-    // UNIQUE constraint como erro cru em vez de replay limpo. Sob o
-    // lock da wallet, isso é estruturalmente impossível.
-    const existing = await this.wagerTransactionRepository.findByIdempotencyKey(
-      command.idempotencyKey,
-      em,
-    );
-    if (existing) {
-      return this.toReplayResult(existing, em);
-    }
-
-    const money = Money.fromString(command.amount, command.currency);
-
-    const transaction = WagerTransaction.create({
-      id: this.idGenerator.next(),
-      providerId: command.providerId,
-      externalTransactionId: command.externalTransactionId,
-      idempotencyKey: command.idempotencyKey,
-      payloadHash: command.payloadHash,
-      walletId: wallet.id,
-      playerId: command.playerId,
-      roundId: command.roundId,
-      gameId: command.gameId,
-      kind: command.kind,
-      money,
-      referenceExternalTransactionId: command.referenceExternalTransactionId,
-    });
-
-    const ledgerEntry = await this.applyEffect(transaction, wallet, money, em);
-
-    await this.persistOutcome(
-      transaction,
-      wallet,
-      ledgerEntry,
-      command.correlationId,
-      command.causationId,
-      em,
-    );
-
-    return this.toResult(transaction, wallet, false);
   }
 
   /**
@@ -203,10 +227,7 @@ export class ProcessWagerTransactionUseCase {
       return;
     }
 
-    const wallet = await this.walletRepository.findByIdForUpdate(current.walletId, em);
-    if (!wallet) {
-      throw new WalletNotFoundError(current.walletId);
-    }
+    const wallet = await this.lockWallet(current.walletId, em);
 
     const ledgerEntry = await this.applyReversal(current, wallet, em);
     await this.persistOutcome(current, wallet, ledgerEntry, undefined, undefined, em);
@@ -251,6 +272,22 @@ export class ProcessWagerTransactionUseCase {
       causationId,
     };
     await this.enqueueEvents(transaction, wallet, ledgerEntry, ctx, em);
+
+    // Seção 12: transações por status (métrica) + log estruturado com os
+    // identificadores mínimos exigidos — nunca o valor monetário nem
+    // payload bruto, só o necessário pra correlacionar/investigar.
+    this.metrics.wagerTransactionsTotal.inc({ status: transaction.status, kind: transaction.kind });
+    this.logger.log({
+      event: 'wager_transaction_finalized',
+      transactionId: transaction.id,
+      walletId: transaction.walletId,
+      providerId: transaction.providerId,
+      correlationId: ctx.correlationId,
+      causationId: ctx.causationId,
+      status: transaction.status,
+      kind: transaction.kind,
+      failureCode: transaction.failureCode,
+    });
 
     // Flush explícito — agregados se referenciam só por FK escalar (sem
     // relação do MikroORM), então se este método for composto com outro
@@ -523,6 +560,10 @@ export class ProcessWagerTransactionUseCase {
     transaction: WagerTransaction,
     em: EntityManager,
   ): Promise<ProcessWagerTransactionResult> {
+    // Regra 7 (seção 7) na prática: mesma idempotencyKey vista de novo.
+    // Seção 12 pede "duplicatas identificadas" como métrica explícita.
+    this.metrics.wagerTransactionDuplicatesTotal.inc();
+
     const entry =
       transaction.status === WagerTransactionStatus.Processed
         ? await this.walletLedgerEntryRepository.findByTransactionId(transaction.id, em)

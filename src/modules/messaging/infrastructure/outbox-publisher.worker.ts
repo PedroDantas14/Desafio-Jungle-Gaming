@@ -1,6 +1,7 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
+import { MetricsService } from '../../../shared/infrastructure/metrics.service';
 import { OutboxMessageRepository } from '../application/ports/outbox-message.repository';
 import { SqsQueueRegistry } from './sqs-queue-registry';
 
@@ -36,6 +37,7 @@ export class OutboxPublisherWorker implements OnModuleInit, OnModuleDestroy {
     private readonly outboxMessageRepository: OutboxMessageRepository,
     private readonly sqsClient: SQSClient,
     private readonly queues: SqsQueueRegistry,
+    private readonly metrics: MetricsService,
   ) {}
 
   onModuleInit(): void {
@@ -81,8 +83,23 @@ export class OutboxPublisherWorker implements OnModuleInit, OnModuleDestroy {
               MessageDeduplicationId: message.payload.eventId,
             }),
           );
-          message.markPublished();
+          const publishedAt = new Date();
+          message.markPublished(publishedAt);
           published += 1;
+
+          // Seção 12: "atraso da outbox" — do momento em que o evento
+          // entrou no outbox (mesma transação que persistiu a mudança de
+          // negócio) até o publish confirmado no SQS.
+          this.metrics.outboxLagSeconds.observe(
+            (publishedAt.getTime() - message.occurredAt.getTime()) / 1000,
+          );
+          this.logger.log({
+            event: 'outbox_message_published',
+            outboxMessageId: message.id,
+            aggregateId: message.aggregateId,
+            eventType: message.eventType,
+            correlationId: message.payload.correlationId,
+          });
         } catch (error) {
           this.logger.error(
             `Failed to publish outbox message "${message.id}" (attempt ${message.attempts + 1}): ${

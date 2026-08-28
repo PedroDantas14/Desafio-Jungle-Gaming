@@ -1,5 +1,6 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/postgresql';
+import { MetricsService } from '../../../shared/infrastructure/metrics.service';
 import { WagerTransactionRepository } from '../application/ports/wager-transaction.repository';
 import { ProcessWagerTransactionUseCase } from '../application/process-wager-transaction.use-case';
 import { WagerTransactionStatus } from '../domain/wager-transaction';
@@ -49,6 +50,7 @@ export class PendingReferenceReprocessorWorker implements OnModuleInit, OnModule
     private readonly em: EntityManager,
     private readonly wagerTransactionRepository: WagerTransactionRepository,
     private readonly processWagerTransactionUseCase: ProcessWagerTransactionUseCase,
+    private readonly metrics: MetricsService,
   ) {}
 
   onModuleInit(): void {
@@ -104,8 +106,25 @@ export class PendingReferenceReprocessorWorker implements OnModuleInit, OnModule
           return after?.status;
         });
 
-        if (afterStatus && afterStatus !== WagerTransactionStatus.PendingReference) {
+        const stillPending = !afterStatus || afterStatus === WagerTransactionStatus.PendingReference;
+        // Seção 12: "tentativas de reprocessamento" — cada ciclo sobre
+        // cada transação conta como uma tentativa, rotulada pelo
+        // desfecho (o TTL expirado é um desfecho distinto de um retry
+        // comum que simplesmente não achou a referência ainda).
+        this.metrics.pendingReferenceOutcomesTotal.inc({
+          outcome: stillPending ? 'still_pending' : expired ? 'expired' : 'resolved',
+        });
+
+        if (!stillPending) {
           resolved += 1;
+          this.logger.log({
+            event: 'pending_reference_resolved',
+            transactionId: transaction.id,
+            walletId: transaction.walletId,
+            providerId: transaction.providerId,
+            status: afterStatus,
+            expired,
+          });
         }
       } catch (error) {
         this.logger.error(

@@ -3,10 +3,13 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { AppModule } from './app.module';
+import { JsonLogger } from './shared/infrastructure/json-logger';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, {
-    logger: ['log', 'error', 'warn', 'debug', 'verbose'],
+    // Logger estruturado (seção 12) desde o boot — inclusive os logs
+    // internos do próprio Nest passam a sair em JSON.
+    logger: new JsonLogger(),
   });
 
   app.enableShutdownHooks();

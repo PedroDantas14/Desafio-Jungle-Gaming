@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { type IdGenerator } from '../../../shared/application/id-generator';
 import { Money } from '../../../shared/domain/money';
+import { MetricsService } from '../../../shared/infrastructure/metrics.service';
 import { type OutboxMessageRepository } from '../../messaging/application/ports/outbox-message.repository';
 import { type OutboxMessage } from '../../messaging/domain/outbox-message';
 import { type WalletLedgerEntryRepository } from '../../wallet/application/ports/wallet-ledger-entry.repository';
@@ -168,6 +169,7 @@ function setup() {
     wagerTransactionRepository,
     outboxMessageRepository,
     idGenerator,
+    new MetricsService(),
   );
 
   return {

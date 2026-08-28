@@ -8,6 +8,7 @@ import {
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import { DomainError } from '../../../shared/domain/domain-error';
+import { MetricsService } from '../../../shared/infrastructure/metrics.service';
 import { InboxMessageRepository } from '../../messaging/application/ports/inbox-message.repository';
 import { InboxMessage } from '../../messaging/domain/inbox-message';
 import { InvalidWagerMessageError } from '../../messaging/domain/messaging.errors';
@@ -61,6 +62,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly queues: SqsQueueRegistry,
     private readonly inboxMessageRepository: InboxMessageRepository,
     private readonly processWagerTransactionUseCase: ProcessWagerTransactionUseCase,
+    private readonly metrics: MetricsService,
   ) {}
 
   onModuleInit(): void {
@@ -125,20 +127,22 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       if (error instanceof DomainError) {
         // Erro de negócio: terminal, reenviar não muda nada — ack e segue.
-        this.logger.warn(
-          `Business error processing message "${message.MessageId}": ${error.message}`,
-        );
+        this.logger.warn({
+          event: 'wager_message_business_error',
+          messageId: message.MessageId,
+          error: error.message,
+        });
         await this.delete(message.ReceiptHandle);
         return;
       }
 
       // Transitório/desconhecido: NÃO apaga. Visibility timeout expira,
       // SQS reentrega; a redrive policy da fila cuida da DLQ sozinha.
-      this.logger.error(
-        `Transient error processing message "${message.MessageId}", will be redelivered: ${
-          error instanceof Error ? error.message : 'unknown error'
-        }`,
-      );
+      this.logger.error({
+        event: 'wager_message_transient_error',
+        messageId: message.MessageId,
+        error: error instanceof Error ? error.message : 'unknown error',
+      });
     }
   }
 
@@ -159,10 +163,19 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
 
       // Reusa a linha de inbox se essa messageId já foi recebida mas não
       // concluída (crash no meio da vez anterior) — nunca cria duplicata.
+      const isRedelivery = existingInbox !== null;
       const inbox =
         existingInbox ??
         InboxMessage.receive({ messageId, consumerName: CONSUMER_NAME, payloadHash });
       await this.inboxMessageRepository.save(inbox, em);
+
+      if (isRedelivery) {
+        // Redelivery de uma messageId já vista (concluída ou não) — dedup
+        // no nível de mensagem, eixo diferente do dedup por idempotencyKey
+        // dentro do use case, mas a mesma métrica de "duplicata
+        // identificada" da seção 12 se aplica.
+        this.metrics.wagerTransactionDuplicatesTotal.inc();
+      }
 
       const parsed = this.parseMessage(body);
 
